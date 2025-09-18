@@ -1,0 +1,591 @@
+const { ethers } = require("ethers");
+const { Pool } = require("pg");
+const dotenv = require("dotenv");
+
+// Load environment variables from .env file
+dotenv.config();
+
+// Concurrency control configuration
+const CONCURRENCY_CONFIG = {
+    MAX_CONCURRENT_BLOCKS: 3,     // Maximum number of blocks to process simultaneously
+    MAX_CONCURRENT_STORAGE_QUERIES: 5,  // Maximum concurrency for batch storage queries
+    BATCH_SIZE: 10,               // Queue batch consumption size
+    QUEUE_PROCESS_INTERVAL: 1000  // Queue processing interval (ms)
+};
+
+
+const RPC_URL = process.env.RPC_URL || "http://localhost:8547";
+
+// PostgreSQL configuration
+const DB_CONFIG = {
+    host: process.env.DB_HOST || "localhost",
+    port: parseInt(process.env.DB_PORT || "5432"),
+    database: process.env.DB_NAME || "mydb",
+    user: process.env.DB_USER || "dbuser",
+    password: process.env.DB_PASSWORD || "dbpass",
+    max: 10, // Reduced maximum number of clients in the pool
+    min: 2,  // Minimum number of clients in the pool
+    idleTimeoutMillis: 60000, // Increased idle timeout (60 seconds)
+    connectionTimeoutMillis: 10000, // Increased connection timeout (10 seconds)
+    acquireTimeoutMillis: 60000, // Added acquire timeout (60 seconds)
+    allowExitOnIdle: true, // Allow pool to exit when idle
+};
+
+// Database availability flag
+let isDatabaseAvailable = false;
+
+const provider = new ethers.JsonRpcProvider(RPC_URL);
+
+// PostgreSQL connection pool (only create if database is available)
+let pool: any = null;
+
+// Proxy contract address queue with block number
+interface ProxyQueueItem {
+    address: string;
+    blockNumber: number;
+}
+const proxyAddressQueue: ProxyQueueItem[] = [];
+
+// Bytecode analysis functions
+function skipPush(pushOp: number, counter: number): number {
+    // PUSH1 in dec -> 96, PUSH32 in dec -> 127
+    // To get amount of bytes to push (amount to skip), subtract 95 from opcode
+    return pushOp - 95;
+}
+
+function compareOpcodes(bytecode: string, targetOpcode: number): boolean {
+    // Remove 0x prefix if present
+    const cleanBytecode = bytecode.startsWith('0x') ? bytecode.slice(2) : bytecode;
+
+    // Convert hex string to byte array
+    const bytecodeBytes = [];
+    for (let i = 0; i < cleanBytecode.length; i += 2) {
+        bytecodeBytes.push(parseInt(cleanBytecode.substr(i, 2), 16));
+    }
+
+    let i = 0;
+    while (i < bytecodeBytes.length) {
+        const op = bytecodeBytes[i];
+
+        // Check if it's a PUSH opcode (PUSH1 = 0x60, PUSH32 = 0x7F)
+        if (op >= 0x60 && op <= 0x7F) {
+            // Skip PUSH opcode and its argument
+            const skipBytes = skipPush(op, i);
+            i += skipBytes + 1; // +1 for the PUSH opcode itself
+        } else if (op === targetOpcode) {
+            return true;
+        } else {
+            i++;
+        }
+    }
+
+    return false;
+}
+
+async function checkBytecodeForOpcode(address: string, opcode: number): Promise<boolean> {
+    try {
+        // Use eth_getCode to get contract bytecode
+        const payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getCode",
+            "params": [address, "latest"]
+        };
+
+        const response = await provider.send(payload.method, payload.params);
+
+        if (response && response !== "0x") {
+            // Non-zero bytecode means it's a contract address
+            console.log(`Address ${address} has bytecode, checking for opcode 0x${opcode.toString(16)}...`);
+            return compareOpcodes(response, opcode);
+        } else {
+            console.log(`Address ${address} is not a contract or has no bytecode`);
+            return false;
+        }
+    } catch (error) {
+        console.error(`Error checking bytecode for ${address}:`, error);
+        return false;
+    }
+}
+
+// Database functions
+async function createTablesIfNotExist() {
+    if (!isDatabaseAvailable) {
+        console.log("Database not available, skipping table creation");
+        return;
+    }
+
+    const client = await pool.connect();
+    try {
+        // Create proxy_contracts table if it doesn't exist
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS proxy_contracts (
+                proxy_address VARCHAR(42) PRIMARY KEY,
+                logic_contract VARCHAR(42),
+                admin_contract VARCHAR(42),
+                detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                block_number BIGINT,
+                contract_type VARCHAR(50) DEFAULT 'unknown'
+            )
+        `);
+
+        // Create index for faster queries
+        await client.query(`
+            CREATE INDEX IF NOT EXISTS idx_proxy_contracts_logic ON proxy_contracts(logic_contract)
+        `);
+
+        console.log("Database tables created successfully");
+    } catch (error) {
+        console.error("Error creating database tables:", error);
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
+async function saveOrUpdateProxyContract(proxyAddress: string, logicContract: string, adminContract: string = '', blockNumber: number) {
+    if (!isDatabaseAvailable) {
+        console.log(`Database not available, skipping save for proxy contract: ${proxyAddress}`);
+        return;
+    }
+
+    const client = await pool.connect();
+    try {
+        // Check if proxy contract with same logic contract already exists
+        const existingQuery = 'SELECT proxy_address FROM proxy_contracts WHERE proxy_address = $1 AND logic_contract = $2';
+        const existingResult = await client.query(existingQuery, [proxyAddress.toLowerCase(), logicContract.toLowerCase()]);
+
+        if (existingResult.rows.length > 0) {
+            // Proxy contract with same logic contract already exists, skip insertion
+            console.log(`⏭️  Skipped: proxy contract ${proxyAddress} with logic ${logicContract} already exists`);
+            return;
+        } else {
+            // Insert new proxy contract record (even if proxy_address exists with different logic)
+            const insertQuery = `
+                INSERT INTO proxy_contracts (proxy_address, logic_contract, admin_contract, block_number)
+                VALUES ($1, $2, $3, $4)
+            `;
+            await client.query(insertQuery, [
+                proxyAddress.toLowerCase(),
+                logicContract.toLowerCase(),
+                adminContract ? adminContract.toLowerCase() : null,
+                blockNumber
+            ]);
+            console.log(`🆕 Inserted new proxy contract record: ${proxyAddress} -> ${logicContract}`);
+        }
+    } catch (error) {
+        console.error(`Error saving proxy contract ${proxyAddress}:`, error);
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
+// Scan block for potential proxy contracts using bytecode analysis (with retry mechanism)
+async function find_potential_proxies_with_bytecode_analysis(blockNumber: number, maxRetries: number = 5, retryDelay: number = 2000) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            console.log(`Scanning block ${blockNumber} with bytecode analysis to find proxy contracts... (attempt ${attempt + 1}/${maxRetries + 1})`);
+
+            // Get block with transactions
+            const block = await provider.getBlock(blockNumber, true);
+            if (!block) {
+                console.log(`Block ${blockNumber} not found`);
+                return;
+            }
+
+            // Collect all addresses from transactions
+            const addressesToCheck = new Set<string>();
+
+            for (const tx of block.prefetchedTransactions) {
+                // Add 'from' address
+                if (tx.from) {
+                    addressesToCheck.add(tx.from);
+                }
+
+                // Add 'to' address (if not contract creation)
+                if (tx.to) {
+                    addressesToCheck.add(tx.to);
+                }
+
+                // For contract creation transactions, get the contract address from receipt
+                if (tx.to === null) {
+                    try {
+                        const receipt = await provider.getTransactionReceipt(tx.hash);
+                        if (receipt && receipt.contractAddress) {
+                            addressesToCheck.add(receipt.contractAddress);
+                        }
+                    } catch (error) {
+                        console.warn(`Failed to get receipt for contract creation tx ${tx.hash}:`, error);
+                    }
+                }
+            }
+
+            console.log(`Block ${blockNumber} found ${addressesToCheck.size} unique addresses to check`);
+
+            // Check bytecode for each address concurrently but with limit
+            const DELEGATECALL_OPCODE = 0xf4; // DELEGATECALL opcode in hex
+            const checkPromises = Array.from(addressesToCheck).map(address =>
+                checkBytecodeForOpcode(address, DELEGATECALL_OPCODE)
+            );
+
+            // Process in batches to avoid overwhelming the RPC
+            const batchSize = 10;
+            let foundProxies = 0;
+
+            for (let i = 0; i < checkPromises.length; i += batchSize) {
+                const batch = checkPromises.slice(i, i + batchSize);
+                const results = await Promise.all(batch);
+
+                for (let j = 0; j < results.length; j++) {
+                    if (results[j]) {
+                        const address = Array.from(addressesToCheck)[i + j];
+                        console.log(`Found proxy contract address: ${address}`);
+
+                        // Add to queue for type checking and database saving
+                        proxyAddressQueue.push({ address, blockNumber });
+                        foundProxies++;
+                    }
+                }
+            }
+
+            if (foundProxies > 0) {
+                console.log(`Block ${blockNumber} found ${foundProxies} proxy contracts, added to queue, current queue length: ${proxyAddressQueue.length}`);
+            } else {
+                console.log(`Block ${blockNumber} no proxy contracts found`);
+            }
+
+            return; // Successfully completed, exit function
+
+        } catch (error: any) {
+            // Check if it's a "block in the future" error
+            const isBlockInFuture = error?.error?.message?.includes('block in the future') ||
+                                  error?.message?.includes('block in the future');
+
+            if (isBlockInFuture && attempt < maxRetries) {
+                console.log(`Block ${blockNumber} is in the future, waiting ${retryDelay}ms before retry... (${attempt + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                continue;
+            }
+
+            // If not a future block error, or max retries reached, throw error
+            console.error(`Block ${blockNumber} bytecode analysis failed (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
+            throw error;
+        }
+    }
+}
+
+// Consume proxy contract addresses from queue, query storage to determine proxy type
+async function consumeProxyAddressQueue() {
+    while (true) {
+        if (proxyAddressQueue.length > 0) {
+            // Batch process addresses in queue
+            const batchSize = Math.min(CONCURRENCY_CONFIG.BATCH_SIZE, proxyAddressQueue.length);
+            const batchItems = proxyAddressQueue.splice(0, batchSize); // Take out a batch of items from queue head
+
+            if (batchItems.length > 0) {
+                // Extract addresses and block numbers
+                const batchAddresses = batchItems.map(item => item.address);
+                const blockNumber = batchItems[0].blockNumber; // Use the first item's block number
+
+                // Process this batch of addresses concurrently
+                await checkProxyTypesBatch(batchAddresses, blockNumber);
+            }
+        } else {
+            // Wait when queue is empty
+            await new Promise(resolve => setTimeout(resolve, CONCURRENCY_CONFIG.QUEUE_PROCESS_INTERVAL));
+        }
+    }
+}
+
+// Check proxy contract types in batch
+async function checkProxyTypesBatch(contractAddresses: string[], blockNumber: number = 0) {
+    if (contractAddresses.length === 0) return;
+
+    try {
+        console.log(`Checking proxy contract types for ${contractAddresses.length} contracts`);
+
+        // Build batch storage query requests
+        const storageRequests = contractAddresses.flatMap((address, index) => [
+            {
+                "jsonrpc": "2.0",
+                "id": index * 2 + 1,
+                "method": "eth_getStorageAt",
+                "params": [
+                    address,
+                    "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", // EIP-1967 logic contract storage slot
+                    "latest"
+                ]
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": index * 2 + 2,
+                "method": "eth_getStorageAt",
+                "params": [
+                    address,
+                    "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103", // EIP-1967 admin storage slot
+                    "latest"
+                ]
+            }
+        ]);
+
+        // Send batch query requests concurrently, but limit concurrency
+        const batchSize = CONCURRENCY_CONFIG.MAX_CONCURRENT_STORAGE_QUERIES;
+        const results = [];
+
+        for (let i = 0; i < storageRequests.length; i += batchSize) {
+            const batch = storageRequests.slice(i, i + batchSize);
+            const batchPromises = batch.map(req => provider.send(req.method, req.params));
+            const batchResults = await Promise.all(batchPromises);
+            results.push(...batchResults);
+        }
+
+        // Process results
+        for (let i = 0; i < contractAddresses.length; i++) {
+            const contractAddress = contractAddresses[i];
+            const logicResponse = results[i * 2];
+            const adminResponse = results[i * 2 + 1];
+
+            await processProxyTypeResult(contractAddress, logicResponse, adminResponse, blockNumber);
+        }
+
+    } catch (error) {
+        console.error(`Error occurred when checking proxy contracts batch:`, error);
+        // If batch query fails, fall back to individual queries
+        console.log("Falling back to individual queries...");
+        for (const address of contractAddresses) {
+            await checkProxyType(address, blockNumber);
+        }
+    }
+}
+
+// Check proxy contract type (keep original interface for fallback)
+async function checkProxyType(contractAddress: string, blockNumber: number = 0) {
+    try {
+        console.log(`Checking proxy contract type: ${contractAddress}`);
+
+        // Query logic contract and admin address storage slots in parallel
+        const logicPayload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getStorageAt",
+            "params": [
+                contractAddress,
+                "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", // EIP-1967 logic contract storage slot
+                "latest"
+            ]
+        };
+
+        const adminPayload = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "eth_getStorageAt",
+            "params": [
+                contractAddress,
+                "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103", // EIP-1967 admin storage slot
+                "latest"
+            ]
+        };
+
+        const [logicResponse, adminResponse] = await Promise.all([
+            provider.send(logicPayload.method, logicPayload.params),
+            provider.send(adminPayload.method, adminPayload.params)
+        ]);
+
+        console.log("eth_getStorageAt response logic contract", logicResponse);
+        console.log("eth_getStorageAt response admin", adminResponse);
+
+        await processProxyTypeResult(contractAddress, logicResponse, adminResponse, blockNumber);
+
+    } catch (error) {
+        console.error(`Error occurred when checking proxy contract ${contractAddress} type:`, error);
+    }
+}
+
+// Process proxy contract type check results (extract common logic)
+async function processProxyTypeResult(contractAddress: string, logicResponse: string, adminResponse: string, blockNumber: number = 0) {
+    // Helper function to clean address format
+    const cleanAddress = (value: string) => {
+        const clean = value.startsWith('0x') ? value : '0x' + value;
+        return clean.replace(/^0x0+/, '0x');
+    };
+
+    // Helper function to check if address format is valid
+    const isValidAddress = (addr: string) => {
+        return addr.match(/^0x[0-9a-fA-F]{40}$/) && addr.length === 42;
+    };
+
+    if (logicResponse && adminResponse) {
+        const logicStorageValue = cleanAddress(logicResponse);
+        const adminStorageValue = cleanAddress(adminResponse);
+
+        console.log(`Contract ${contractAddress} logic contract storage value: ${logicStorageValue}`);
+        console.log(`Contract ${contractAddress} admin storage value: ${adminStorageValue}`);
+
+        // Check logic contract storage slot
+        const isLogicZero = logicResponse === "0x0000000000000000000000000000000000000000000000000000000000000000";
+        const isAdminZero = adminResponse === "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+        if (isLogicZero && isAdminZero) {
+            console.log(` Found non-standard proxy contract: ${contractAddress}`);
+        } else if (isValidAddress(logicStorageValue) && !isLogicZero) {
+            console.log(` 🔍Found standard proxy contract: ${contractAddress}`);
+            console.log(`    Logic contract: ${logicStorageValue}`);
+            if (!isAdminZero && isValidAddress(adminStorageValue)) {
+                console.log(` Admin address: ${adminStorageValue}`);
+            } else {
+                console.log(` Admin: Not set or invalid`);
+            }
+
+            // Save to database with logic and admin contract information
+            try {
+                await saveOrUpdateProxyContract(
+                    contractAddress,
+                    logicStorageValue,
+                    isValidAddress(adminStorageValue) && !isAdminZero ? adminStorageValue : '',
+                    blockNumber
+                );
+            } catch (dbError) {
+                console.error(`Failed to save proxy contract ${contractAddress} to database:`, dbError);
+            }
+        } else {
+            console.log(` Found proxy contract but storage value format abnormal: ${contractAddress}`);
+            console.log(`   Logic contract storage value: ${logicStorageValue}`);
+            // console.log(`   Admin storage value: ${adminStorageValue}`);
+        }
+    } else {
+        console.log(`Contract ${contractAddress} query failed or no result`);
+    }
+}
+
+// Concurrency control variables
+let activeBlockScans = 0;
+const pendingBlocks: number[] = [];
+
+// Process block scanning concurrently
+async function processBlockWithConcurrency(blockNumber: number) {
+    if (activeBlockScans >= CONCURRENCY_CONFIG.MAX_CONCURRENT_BLOCKS) {
+        // If concurrency limit is reached, add to waiting queue
+        pendingBlocks.push(blockNumber);
+        console.log(`Block ${blockNumber} queued for processing (active: ${activeBlockScans}, queued: ${pendingBlocks.length})`);
+        return;
+    }
+
+    activeBlockScans++;
+    try {
+        await processBlock(blockNumber);
+    } finally {
+        activeBlockScans--;
+
+        // Process next block in waiting queue
+        if (pendingBlocks.length > 0) {
+            const nextBlock = pendingBlocks.shift();
+            if (nextBlock !== undefined) {
+                setImmediate(() => processBlockWithConcurrency(nextBlock));
+            }
+        }
+    }
+}
+
+// Process single block
+async function processBlock(blockNumber: number) {
+    console.log(`Processing block: ${blockNumber}`);
+    const block = await provider.getBlock(blockNumber, true); // true means get complete transaction objects
+
+    for (const tx of block.prefetchedTransactions) {
+        // Check if to address is null, which is the sign of contract creation
+        if (tx.to === null) {
+            console.log("---------------------------------");
+            console.log(`Contract creation transaction found!`);
+            console.log(`  - Block number: ${blockNumber}`);
+            console.log(`  - Transaction hash: ${tx.hash}`);
+            console.log(`  - Creator address: ${tx.from}`);
+
+            // Get new contract address through transaction receipt
+            const receipt = await provider.getTransactionReceipt(tx.hash);
+            if (receipt && receipt.contractAddress) {
+                console.log(`  - New contract address: ${receipt.contractAddress}`);
+            }
+            console.log("---------------------------------");
+        }
+    }
+
+    // Call bytecode analysis function to scan current block
+    try {
+        await find_potential_proxies_with_bytecode_analysis(blockNumber);
+    } catch (error) {
+        console.error(`Block ${blockNumber} bytecode analysis failed, skipping further processing:`, error);
+        return; // Exit current callback function
+    }
+}
+
+async function main() {
+    try {
+        console.log("Initializing database...");
+        console.log("Database config:", {
+            host: DB_CONFIG.host,
+            port: DB_CONFIG.port,
+            database: DB_CONFIG.database,
+            user: DB_CONFIG.user,
+            password: DB_CONFIG.password ? "***" : undefined
+        });
+        // Try to initialize database
+        try {
+            pool = new Pool(DB_CONFIG);
+            await createTablesIfNotExist();
+            isDatabaseAvailable = true;
+            console.log("Database initialized successfully");
+        } catch (dbError) {
+            const errorMessage = dbError instanceof Error ? dbError.message : String(dbError);
+            console.warn("Database not available, continuing without database functionality:", errorMessage);
+            console.log("Proxy contracts will be detected but not saved to database");
+            isDatabaseAvailable = false;
+        }
+
+        console.log("Starting to listen for new blocks...");
+        console.log(`Concurrency config: max concurrent blocks = ${CONCURRENCY_CONFIG.MAX_CONCURRENT_BLOCKS}, batch size = ${CONCURRENCY_CONFIG.BATCH_SIZE}`);
+        if (isDatabaseAvailable) {
+            console.log("Database: ENABLED");
+        } else {
+            console.log("Database: DISABLED (no PostgreSQL connection)");
+        }
+
+        // Start queue consumer (running in background)
+        consumeProxyAddressQueue().catch(error => {
+            console.error("Queue consumer error:", error);
+        });
+
+        provider.on("block", async (blockNumber: number) => {
+            console.log(`New block discovered: ${blockNumber}`);
+
+            // Use concurrency controller to process block
+            await processBlockWithConcurrency(blockNumber);
+        });
+    } catch (error) {
+        console.error("Failed to start application:", error);
+        process.exit(1);
+    }
+}
+
+// Graceful shutdown
+async function cleanup() {
+    console.log("Shutting down gracefully...");
+    try {
+        if (isDatabaseAvailable && pool) {
+            await pool.end();
+            console.log("Database connection closed");
+        }
+    } catch (error) {
+        console.error("Error closing database connection:", error);
+    }
+    process.exit(0);
+}
+
+process.on('SIGINT', cleanup);
+process.on('SIGTERM', cleanup);
+
+main().catch(error => {
+    console.error("Error occurred:", error);
+    cleanup();
+});

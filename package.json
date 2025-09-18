@@ -3,7 +3,12 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "ts-node src/demo/blockScannerDemo.ts",
+    "test:scanner": "ts-node src/test-simple.ts",
+    "scan:range": "ts-node src/demo/blockScannerDemo.ts --scan",
+    "build": "tsc",
+    "dev": "nodemon --exec ts-node src/demo/blockScannerDemo.ts"
   },
   "keywords": [],
   "author": "",
@@ -13,11 +18,13 @@
     "@ethersproject/abi": "^5.8.0",
     "@ethersproject/contracts": "^5.8.0",
     "@ethersproject/providers": "^5.8.0",
+    "@types/pg": "^8.15.5",
     "@types/ws": "^8.18.1",
     "axios": "^1.11.0",
     "dotenv": "^17.2.1",
     "ethers": "^6.15.0",
     "nodemon": "^3.1.10",
+    "pg": "^8.16.3",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.2",
     "ws": "^8.18.3"
