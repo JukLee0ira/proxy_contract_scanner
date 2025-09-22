@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const RPC_URL = process.env.RPC_URL || "http://localhost:8545";
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -24,8 +25,8 @@ const config: HardhatUserConfig = {
   },
   networks: {
     pNet: {
-      url: process.env.RPC_URL,
-      accounts: [PRIVATE_KEY],
+      url: RPC_URL,
+      accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
     },
     hardhat: {
       chainId: 31337,
@@ -38,7 +39,7 @@ const config: HardhatUserConfig = {
     },
     devnet: {
       url: "https://devnetstats.hashlabs.apothem.network/devnet",
-      accounts: [PRIVATE_KEY],
+      accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
       timeout: 60000,
       gasPrice: 300000000000,
       gas: 2100000,

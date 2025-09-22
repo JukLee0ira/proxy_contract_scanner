@@ -1,4 +1,5 @@
 import { ethers } from 'ethers';
+import { JsonRpcProvider } from '@ethersproject/providers';
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 
@@ -22,11 +23,11 @@ const DB_CONFIG = {
 };
 
 describe('Proxy Scanner Connectivity Tests', () => {
-    let provider: ethers.JsonRpcProvider;
+    let provider: JsonRpcProvider;
     let dbPool: Pool | null = null;
 
     beforeAll(() => {
-        provider = new ethers.JsonRpcProvider(RPC_URL);
+        provider = new JsonRpcProvider(RPC_URL);
     });
 
     afterAll(async () => {
@@ -40,10 +41,10 @@ describe('Proxy Scanner Connectivity Tests', () => {
             const network = await provider.getNetwork();
             
             expect(network).toBeDefined();
-            expect(typeof network.chainId).toBe('bigint');
+            expect(typeof network.chainId).toBe('number');
             expect(Number(network.chainId)).toBeGreaterThan(0);
             
-            console.log(`✅ Connected to network: Chain ID ${network.chainId}, Name: ${network.name || 'Unknown'}`);
+
         });
     });
 
@@ -68,7 +69,7 @@ describe('Proxy Scanner Connectivity Tests', () => {
             expect(result.rows).toHaveLength(1);
             expect(result.rows[0].current_time).toBeInstanceOf(Date);
             
-            console.log(`✅ Database connection established at: ${result.rows[0].current_time}`);
+
             
             client.release();
         });
@@ -81,7 +82,7 @@ describe('Proxy Scanner Connectivity Tests', () => {
             
             expect(version).toContain('PostgreSQL');
             
-            console.log(`✅ PostgreSQL version: ${version.split(' ')[0]}`);
+
             
             client.release();
         });
@@ -116,7 +117,7 @@ describe('Proxy Scanner Connectivity Tests', () => {
             // Cleanup
             await client.query(`DROP TABLE IF EXISTS proxy_contracts_test`);
             
-            console.log(`✅ Table operations test successful`);
+
             
             client.release();
         });
@@ -171,7 +172,7 @@ describe('Proxy Scanner Connectivity Tests', () => {
             
             expect(hasDelegateCall).toBe(true);
             
-            console.log(`✅ Bytecode parsing test successful`);
+
         });
 
         test('should check bytecode for DELEGATECALL opcode', async () => {
@@ -183,7 +184,7 @@ describe('Proxy Scanner Connectivity Tests', () => {
             expect(typeof result).toBe('boolean');
             expect(result).toBe(false); // Empty address should not have DELEGATECALL
             
-            console.log(`✅ DELEGATECALL detection test successful`);
+
         });
 
 
@@ -200,7 +201,7 @@ describe('Proxy Scanner Connectivity Tests', () => {
             expect(logicValue).toMatch(/^0x/);
             expect(adminValue).toMatch(/^0x/);
             
-            console.log(`✅ EIP-1967 storage queries successful`);
+
         });
     });
 });

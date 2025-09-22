@@ -89,7 +89,7 @@ function compileContracts() {
             const artifactPath = path.join(contractDir, `${contractName}.json`);
             fs.writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
             
-            console.log(`✅ Saved ${contractName} artifact`);
+
         }
     });
 

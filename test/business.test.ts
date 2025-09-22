@@ -1,4 +1,5 @@
 import { ethers } from 'ethers';
+import { JsonRpcProvider } from '@ethersproject/providers';
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 
@@ -19,7 +20,7 @@ const DB_CONFIG = {
 };
 
 describe('Proxy Scanner Business Logic Tests', () => {
-    let provider: ethers.JsonRpcProvider;
+    let provider: JsonRpcProvider;
     let signer: ethers.Wallet;
     let dbPool: Pool;
     
@@ -167,7 +168,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
 
     beforeAll(async () => {
         // Initialize provider and signer
-        provider = new ethers.JsonRpcProvider(RPC_URL);
+        provider = new JsonRpcProvider(RPC_URL);
         
         if (!process.env.PRIVATE_KEY) {
             throw new Error('PRIVATE_KEY not found in environment variables');
@@ -255,7 +256,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             const hasDelegateCall = await checkBytecodeForOpcode(proxyAddress, DELEGATECALL_OPCODE);
             
             expect(hasDelegateCall).toBe(true);
-            console.log(`✅ Proxy contract ${proxyAddress} contains DELEGATECALL: ${hasDelegateCall}`);
+
         });
 
         test('should verify logic contract does not contain DELEGATECALL', async () => {
@@ -266,7 +267,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             const hasDelegateCall = await checkBytecodeForOpcode(logicAddress, DELEGATECALL_OPCODE);
             
             expect(hasDelegateCall).toBe(false);
-            console.log(`✅ Logic contract ${logicAddress} does not contain DELEGATECALL: ${hasDelegateCall}`);
+
         });
 
         test('should extract proxy and logic contract addresses from storage', async () => {
@@ -283,7 +284,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             expect(isValidAddress(logicStorageValue)).toBe(true);
             expect(logicStorageValue.toLowerCase()).toBe(logicAddress.toLowerCase());
             
-            console.log(`✅ Proxy ${proxyAddress}:`);
+
             console.log(`   Logic contract: ${logicStorageValue}`);
             console.log(`   Admin: ${adminStorageValue}`);
         });
@@ -299,7 +300,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             const insertedId = await saveProxyToDatabase(proxyAddress, logicAddress, '', blockNumber);
             
             expect(insertedId).toBeTruthy();
-            console.log(`✅ Saved proxy contract to database with ID: ${insertedId}`);
+
             
             // Verify data in database
             const savedRecords = await getProxyFromDatabase(proxyAddress, logicAddress);
@@ -309,7 +310,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             expect(savedRecords[0].logic_contract).toBe(logicAddress.toLowerCase());
             expect(savedRecords[0].block_number).toBe(blockNumber.toString());
             
-            console.log(`✅ Verified proxy contract data in database`);
+
         });
 
         test('should handle duplicate proxy contracts correctly', async () => {
@@ -322,7 +323,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             
             // Should not insert duplicate
             expect(duplicateId).toBeNull();
-            console.log(`✅ Correctly handled duplicate proxy contract`);
+
         });
     });
 
@@ -353,7 +354,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             expect(upgradeEvents[0].newImplementation.toLowerCase()).toBe(logicV2Address.toLowerCase());
             expect(upgradeEvents[0].transactionHash).toBe(receipt?.hash);
             
-            console.log(`✅ Detected upgrade event:`);
+
             console.log(`   New implementation: ${upgradeEvents[0].newImplementation}`);
             console.log(`   Transaction hash: ${upgradeEvents[0].transactionHash}`);
             console.log(`   Block number: ${upgradeEvents[0].blockNumber}`);
@@ -363,7 +364,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             const newLogicAddress = cleanAddress(storage.logic);
             
             expect(newLogicAddress.toLowerCase()).toBe(logicV2Address.toLowerCase());
-            console.log(`✅ Storage updated to new logic contract: ${newLogicAddress}`);
+
         });
 
         test('should verify proxy functionality after upgrade', async () => {
@@ -382,7 +383,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             const version = await (proxyAsLogicV2 as any).version();
             expect(version).toBe("V2");
             
-            console.log(`✅ Proxy functionality verified after upgrade:`);
+
             console.log(`   X value: ${newX}`);
             console.log(`   Version: ${version}`);
         });
@@ -411,7 +412,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             );
             
             expect(insertedId).toBeTruthy();
-            console.log(`✅ Saved upgrade event to database with ID: ${insertedId}`);
+
             
             // Verify upgrade event in database
             const savedRecords = await getProxyFromDatabase(proxyAddress);
@@ -429,7 +430,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             expect(upgradeRecord.upgrade_tx_hash).toBe(txHash);
             expect(upgradeRecord.block_number).toBe(blockNumber.toString());
             
-            console.log(`✅ Verified upgrade event in database:`);
+
             console.log(`   Proxy: ${upgradeRecord.proxy_address}`);
             console.log(`   New logic: ${upgradeRecord.logic_contract}`);
             console.log(`   Tx hash: ${upgradeRecord.upgrade_tx_hash}`);
@@ -457,7 +458,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             expect(logicV1Record.upgrade_tx_hash).toBeFalsy();
             expect(logicV2Record.upgrade_tx_hash).toBeTruthy();
             
-            console.log(`✅ Upgrade history tracked correctly:`);
+
             console.log(`   Total records: ${allRecords.length}`);
             console.log(`   V1 deployment: ${logicV1Record.detected_at}`);
             console.log(`   V2 upgrade: ${logicV2Record.detected_at}`);
@@ -477,7 +478,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
             const hasDelegateCall = await checkBytecodeForOpcode(proxyAddress, DELEGATECALL_OPCODE);
             
             if (hasDelegateCall) {
-                console.log(`✅ Step 1: Found DELEGATECALL in ${proxyAddress}`);
+
                 
                 // Step 2: Extract storage values
                 const storage = await getProxyStorage(proxyAddress);
@@ -485,7 +486,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
                 const adminAddress = cleanAddress(storage.admin);
                 
                 if (isValidAddress(logicAddress)) {
-                    console.log(`✅ Step 2: Extracted logic contract: ${logicAddress}`);
+
                     
                     // Step 3: Save to database
                     const insertedId = await saveProxyToDatabase(
@@ -496,7 +497,7 @@ describe('Proxy Scanner Business Logic Tests', () => {
                     );
                     
                     if (insertedId) {
-                        console.log(`✅ Step 3: Saved to database with ID: ${insertedId}`);
+
                     } else {
                         console.log(`ℹ️  Step 3: Already exists in database`);
                     }
@@ -505,8 +506,8 @@ describe('Proxy Scanner Business Logic Tests', () => {
                     const savedRecords = await getProxyFromDatabase(proxyAddress, logicAddress);
                     expect(savedRecords).toHaveLength(1);
                     
-                    console.log(`✅ Step 4: Verified data integrity`);
-                    console.log(`✅ Scanner workflow completed successfully!`);
+
+
                 } else {
                     console.log(`❌ Step 2: Invalid logic contract address: ${logicAddress}`);
                 }

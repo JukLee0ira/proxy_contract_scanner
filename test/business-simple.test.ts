@@ -1,4 +1,5 @@
 import { ethers } from 'ethers';
+import { JsonRpcProvider } from '@ethersproject/providers';
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 
@@ -19,7 +20,7 @@ const DB_CONFIG = {
 };
 
 describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
-    let provider: ethers.JsonRpcProvider;
+    let provider: JsonRpcProvider;
     let dbPool: Pool;
 
     // Scanner functions (extracted from main file)
@@ -155,7 +156,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
 
     beforeAll(async () => {
         // Initialize provider
-        provider = new ethers.JsonRpcProvider(RPC_URL);
+        provider = new JsonRpcProvider(RPC_URL);
         
         // Initialize database
         dbPool = new Pool(DB_CONFIG);
@@ -197,7 +198,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
             const hasDelegateCall = compareOpcodes(testBytecode, 0xf4);
             
             expect(hasDelegateCall).toBe(true);
-            console.log(`✅ DELEGATECALL detection test passed`);
+
         });
 
         test('should handle bytecode without DELEGATECALL', () => {
@@ -206,7 +207,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
             const hasDelegateCall = compareOpcodes(testBytecode, 0xf4);
             
             expect(hasDelegateCall).toBe(false);
-            console.log(`✅ Non-DELEGATECALL bytecode test passed`);
+
         });
 
         test('should handle empty bytecode', () => {
@@ -214,7 +215,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
             const hasDelegateCall = compareOpcodes(emptyBytecode, 0xf4);
             
             expect(hasDelegateCall).toBe(false);
-            console.log(`✅ Empty bytecode test passed`);
+
         });
     });
 
@@ -227,7 +228,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
             const hasCode = await checkBytecodeForOpcode(zeroAddress, DELEGATECALL_OPCODE);
             
             expect(hasCode).toBe(false);
-            console.log(`✅ Zero address bytecode check passed`);
+
         });
 
         test('should query EIP-1967 storage slots', async () => {
@@ -239,7 +240,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
             expect(storage.logic).toMatch(/^0x/);
             expect(storage.admin).toMatch(/^0x/);
             
-            console.log(`✅ EIP-1967 storage query test passed`);
+
         });
     });
 
@@ -263,7 +264,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
             testCases.forEach(({ input, expected }, index) => {
                 const result = cleanAddress(input);
                 expect(result).toBe(expected);
-                console.log(`✅ Address cleaning test ${index + 1} passed: ${input} -> ${result}`);
+
             });
         });
 
@@ -282,12 +283,12 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
 
             validAddresses.forEach(addr => {
                 expect(isValidAddress(addr)).toBe(true);
-                console.log(`✅ Valid address test passed: ${addr}`);
+
             });
 
             invalidAddresses.forEach(addr => {
                 expect(isValidAddress(addr)).toBe(false);
-                console.log(`✅ Invalid address test passed: ${addr}`);
+
             });
         });
     });
@@ -303,7 +304,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
                 testInsertedId = await saveProxyToDatabase(testProxyAddress, testLogicAddress, '', blockNumber);
                 
                 expect(testInsertedId).toBeTruthy();
-                console.log(`✅ Database save test passed, ID: ${testInsertedId}`);
+
             } catch (error) {
                 console.log(`ℹ️  Database not available, skipping test: ${error}`);
                 testInsertedId = null;
@@ -321,7 +322,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
                 const duplicateId = await saveProxyToDatabase(testProxyAddress, testLogicAddress, '', blockNumber);
                 
                 expect(duplicateId).toBeNull();
-                console.log(`✅ Database duplicate handling test passed`);
+
             } catch (error) {
                 console.log(`ℹ️  Database duplicate test failed: ${error}`);
             }
@@ -340,7 +341,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
                 expect(records[0].proxy_address).toBe(testProxyAddress.toLowerCase());
                 expect(records[0].logic_contract).toBe(testLogicAddress.toLowerCase());
                 
-                console.log(`✅ Database retrieval test passed`);
+
             } catch (error) {
                 console.log(`ℹ️  Database retrieval test failed: ${error}`);
             }
@@ -361,13 +362,13 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
                     const blockNumber = currentBlock - i;
                     
                     try {
-                        const block = await provider.getBlock(blockNumber, true);
-                        
-                        if (block && block.prefetchedTransactions) {
-                            console.log(`📦 Block ${blockNumber}: ${block.prefetchedTransactions.length} transactions`);
-                            
+                        const block = await provider.getBlockWithTransactions(blockNumber);
+
+                        if (block && block.transactions) {
+                            console.log(`📦 Block ${blockNumber}: ${block.transactions.length} transactions`);
+
                             // Check some transaction addresses
-                            for (const tx of block.prefetchedTransactions.slice(0, 3)) {
+                            for (const tx of block.transactions.slice(0, 3)) {
                                 if (tx.to) {
                                     const hasCode = await provider.getCode(tx.to);
                                     if (hasCode && hasCode !== "0x") {
@@ -390,7 +391,7 @@ describe('Proxy Scanner Business Logic Tests (Simplified)', () => {
                     }
                 }
                 
-                console.log(`✅ Network analysis completed: ${contractsFound} contracts found`);
+
                 expect(contractsFound).toBeGreaterThanOrEqual(0);
                 
             } catch (error) {

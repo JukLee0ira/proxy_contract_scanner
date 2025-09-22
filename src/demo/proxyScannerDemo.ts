@@ -161,7 +161,7 @@ class ProxyEventListener {
 
         try {
             await saveOrUpdateProxyContract(proxyAddress, newImplementation, '', blockNumber, txHash);
-            console.log(`✅ Upgrade event saved to database: ${proxyAddress} -> ${newImplementation}`);
+
         } catch (error) {
             console.error(`Failed to save upgrade event to database:`, error);
         }
