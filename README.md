@@ -1,19 +1,30 @@
-# Upgradable Contract Detection System
+# Proxy Scanner
 
-This is a system that monitors the Ethereum blockchain and automatically detects upgradable contracts (proxy contracts).
+A comprehensive Ethereum proxy contract scanner and monitoring tool with Hardhat support for testing and development.
 
+## Features
+
+- **Real-time Proxy Detection**: Monitors blockchain for proxy contracts using bytecode analysis
+- **EIP-1967 Support**: Detects standard proxy patterns with logic and admin contracts
+- **Event Monitoring**: Tracks upgrade events for discovered proxy contracts
+- **Database Integration**: Optional PostgreSQL support for persistent storage
+- **Hardhat Integration**: Smart contract testing and deployment capabilities
+- **Configurable**: Flexible configuration system for different networks and environments
 
 ## Project Structure
 
 ```
-proxy_demo/
+proxy_scanner/
 ├── src/
 │   ├── config/
 │   │   └── app.ts          # Application configuration
 │   └── demo/
 │       └── proxyScannerDemo.ts  # Proxy scanner demo
+├── contracts/              # Smart contracts for testing
+├── test/                   # Hardhat tests
 ├── package.json
 ├── tsconfig.json
+├── hardhat.config.ts
 └── README.md
 ```
 
@@ -32,7 +43,9 @@ Create a `.env` file and configure your RPC endpoint:
 
 ```bash
 # Ethereum RPC Configuration
-RPC_URL=http://localhost:8547
+RPC_URL=https://erpc.apothem.network/
+PRIVATE_KEY=<your-private-key>
+
 ```
 
 You can also set it directly through environment variables, or modify the default values in the code. The system uses `http://localhost:8547` by default.
@@ -70,6 +83,8 @@ CREATE TABLE proxy_contracts (
 
 #### Real-time Monitoring Mode
 ```bash
+npm start
+# or
 npx ts-node src/demo/proxyScannerDemo.ts
 ```
 
@@ -78,12 +93,16 @@ npx ts-node src/demo/proxyScannerDemo.ts
 # Build project
 npm run build
 
-# Development mode
+# Development mode with auto-restart
 npm run dev
 
-# Test scanner
-npm run test:scanner
-
 # Range scan mode
-npm run scan:range
+npm run scan
+
+# Hardhat commands
+npm run hardhat:compile
+npm run hardhat:test
+
+# Test the project
+npm test
 ```
