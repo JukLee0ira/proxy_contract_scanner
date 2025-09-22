@@ -1,0 +1,40 @@
+{
+  "name": "proxy_scanner",
+  "version": "1.0.0",
+  "description": "Proxy contract scanner and monitoring tool with Hardhat support",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "ts-node src/demo/proxyScannerDemo.ts",
+    "scan": "ts-node src/demo/proxyScannerDemo.ts --scan",
+    "dev": "nodemon --exec ts-node src/demo/proxyScannerDemo.ts",
+    "build": "tsc",
+    "hardhat:test": "hardhat test",
+    "hardhat:compile": "hardhat compile"
+  },
+  "keywords": ["proxy", "scanner", "ethereum", "hardhat", "blockchain"],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^2.0.2",
+    "@nomiclabs/hardhat-ethers": "^2.2.3",
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "@types/ws": "^8.18.1",
+    "hardhat": "^2.14.0",
+    "nodemon": "^3.1.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@ethersproject/abi": "^5.8.0",
+    "@ethersproject/contracts": "^5.8.0",
+    "@ethersproject/providers": "^5.8.0",
+    "axios": "^1.11.0",
+    "dotenv": "^17.2.1",
+    "ethers": "^6.15.0",
+    "pg": "^8.16.3",
+    "solc": "^0.8.28",
+    "ws": "^8.18.3"
+  }
+}
