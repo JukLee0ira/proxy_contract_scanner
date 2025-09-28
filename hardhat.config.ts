@@ -1,5 +1,5 @@
 import { HardhatUserConfig } from "hardhat/config";
-import "@nomiclabs/hardhat-ethers";
+import "@nomicfoundation/hardhat-toolbox";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -22,6 +22,9 @@ const config: HardhatUserConfig = {
         },
       },
     ],
+  },
+  paths: {
+    tests: "hardhat-test",
   },
   networks: {
     pNet: {
