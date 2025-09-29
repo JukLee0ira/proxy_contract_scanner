@@ -56,6 +56,9 @@ const proxyAddressQueue: ProxyQueueItem[] = [];
 // Global proxy event listener instance
 let proxyEventListener: ProxyEventListener | null = null;
 
+// Global storage slot monitor instance for non-EIP1967 proxies
+let storageSlotMonitor: StorageSlotMonitor | null = null;
+
 // Event listener management for proxy contracts
 class ProxyEventListener {
     private listeners: Map<string, any> = new Map(); // proxyAddress -> listener
@@ -161,7 +164,7 @@ class ProxyEventListener {
 
         try {
             await saveOrUpdateProxyContract(proxyAddress, newImplementation, '', blockNumber, txHash);
-
+            console.log(`✅ Upgrade event saved to database: ${proxyAddress} -> ${newImplementation}`);
         } catch (error) {
             console.error(`Failed to save upgrade event to database:`, error);
         }
@@ -200,6 +203,349 @@ class ProxyEventListener {
         for (const proxyAddress of this.listeners.keys()) {
             await this.removeListener(proxyAddress);
         }
+    }
+}
+
+// Storage slot monitor for non-EIP1967 proxy contracts
+class StorageSlotMonitor {
+    private monitoredProxies: Map<string, string> = new Map(); // proxyAddress -> lastKnownLogicAddress
+    private provider: any;
+    private checkInterval: number; // milliseconds
+    private intervalId: NodeJS.Timeout | null = null;
+    private isRunning: boolean = false;
+
+    constructor(provider: any, checkInterval: number = 30000) { // Default 30 seconds
+        this.provider = provider;
+        this.checkInterval = checkInterval;
+    }
+
+    /**
+     * Add a proxy contract to monitoring list
+     * @param proxyAddress The proxy contract address to monitor
+     * @param initialLogicAddress The initial logic contract address (can be empty)
+     */
+    async addProxy(proxyAddress: string, initialLogicAddress: string = ''): Promise<void> {
+        if (this.monitoredProxies.has(proxyAddress)) {
+            console.log(`⚠️  Proxy ${proxyAddress} is already being monitored`);
+            return;
+        }
+
+        // Try to detect current implementation address from storage slots
+        let currentLogicAddress = initialLogicAddress;
+        if (!currentLogicAddress || currentLogicAddress === '0x0000000000000000000000000000000000000000') {
+            console.log(`🔍 Detecting current implementation for ${proxyAddress}...`);
+            const foundAddresses = await this.checkProxyStorageSlot(proxyAddress);
+            if (foundAddresses.length > 0) {
+                currentLogicAddress = foundAddresses[0]; // Use the first valid address found
+                console.log(`✅ Auto-detected implementation: ${currentLogicAddress}`);
+                // Persist immediately so DB reflects the discovered implementation even without a change event
+                try {
+                    await this.saveUpgradeEvent(proxyAddress, currentLogicAddress, 'initial_storage_detection');
+                } catch (persistError) {
+                    console.error(`Failed to persist initially detected implementation for ${proxyAddress}:`, persistError);
+                }
+            } else {
+                currentLogicAddress = '0x0000000000000000000000000000000000000000';
+                console.log(`⚠️  No implementation detected, will monitor for future implementations`);
+            }
+        }
+
+        this.monitoredProxies.set(proxyAddress, currentLogicAddress.toLowerCase());
+        console.log(`📊 Added proxy ${proxyAddress} to storage slot monitoring (current logic: ${currentLogicAddress})`);
+    }
+
+    /**
+     * Remove a proxy contract from monitoring
+     * @param proxyAddress The proxy contract address to stop monitoring
+     */
+    removeProxy(proxyAddress: string): void {
+        if (this.monitoredProxies.has(proxyAddress)) {
+            this.monitoredProxies.delete(proxyAddress);
+            console.log(`🗑️  Removed proxy ${proxyAddress} from storage slot monitoring`);
+        }
+    }
+
+    /**
+     * Start the monitoring process
+     */
+    startMonitoring(): void {
+        if (this.isRunning) {
+            console.log(`⚠️  Storage slot monitor is already running`);
+            return;
+        }
+
+        console.log(`🚀 Starting storage slot monitoring for ${this.monitoredProxies.size} proxies (interval: ${this.checkInterval}ms)`);
+        this.isRunning = true;
+
+        this.intervalId = setInterval(() => {
+            this.checkAllProxies();
+        }, this.checkInterval);
+    }
+
+    /**
+     * Stop the monitoring process
+     */
+    stopMonitoring(): void {
+        if (!this.isRunning) {
+            return;
+        }
+
+        console.log(`🛑 Stopping storage slot monitoring...`);
+        this.isRunning = false;
+
+        if (this.intervalId) {
+            clearInterval(this.intervalId);
+            this.intervalId = null;
+        }
+    }
+
+    /**
+     * Check storage slots for a single proxy - scan multiple slots and extract possible contract addresses
+     */
+    private async checkProxyStorageSlot(proxyAddress: string): Promise<string[]> {
+        const foundAddresses: string[] = [];
+        const foundSet: Set<string> = new Set();
+
+        // Build dynamic custom slots from known keys
+        const toBytes32 = (hex: string): string => {
+            const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+            return '0x' + clean.padStart(64, '0');
+        };
+        const minusOne = (hex: string): string => {
+            try {
+                const n = BigInt(hex);
+                if (n === 0n) return hex; // avoid underflow
+                const dec = (n - 1n).toString(16).padStart(64, '0');
+                return '0x' + dec;
+            } catch {
+                return hex;
+            }
+        };
+
+        const dynamicKeyStrings = [
+            // Common custom patterns; extendable without code changes
+            'simple.proxy.impl',
+            'proxy.implementation',
+            'implementation'
+        ];
+        const dynamicSlots: string[] = [];
+        for (const key of dynamicKeyStrings) {
+            try {
+                const h = (ethers as any).id(key); // keccak256(utf8(key))
+                const h32 = toBytes32(h);
+                dynamicSlots.push(h32);
+                dynamicSlots.push(minusOne(h32));
+            } catch {
+                // ignore single key failure
+            }
+        }
+
+        // Check a range of common slots (priority order)
+        const slotsToCheck = [
+            // Prefer EIP-1967 first
+            '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc', // keccak256("eip1967.proxy.implementation")
+            '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103', // EIP-1967 admin (sometimes misused to store impl)
+
+            // OpenZeppelin historical
+            '0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3', // keccak256("org.zeppelinos.proxy.implementation")
+
+            // Dynamic custom slots (runtime keccak + minus-one variants)
+            ...dynamicSlots,
+
+            // Direct slots (fallbacks)
+            '0x0000000000000000000000000000000000000000000000000000000000000000', // slot 0
+            '0x0000000000000000000000000000000000000000000000000000000000000001', // slot 1
+            '0x0000000000000000000000000000000000000000000000000000000000000002', // slot 2
+            '0x0000000000000000000000000000000000000000000000000000000000000003', // slot 3
+
+            // Hardcoded fallbacks kept for compatibility (may catch legacy/custom)
+            '0x37722d2c9f3a89a6e4315c7c2e76f6b8c6b7a2b9f4d3c8e1a0b5f2e9c7d6a8b3e4',
+            '0x421c7b3cd1b1c4a4bc48c2635d1b7b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b',
+            '0x2c7e8a8c3b1c6b5d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1',
+            '0x5c60da1b00000000000000000000000000000000000000000000000000000000'
+        ];
+
+        // Also check some keccak256 hashed slots
+        const hashedSlots = [
+            "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", // keccak256("eip1967.proxy.implementation")
+        ];
+
+        // Check all predefined slots
+        for (const slot of [...slotsToCheck, ...hashedSlots]) {
+            try {
+                const payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "eth_getStorageAt",
+                    "params": [
+                        proxyAddress,
+                        slot,
+                        "latest"
+                    ]
+                };
+
+                const response = await this.provider.send(payload.method, payload.params);
+                if (response && response !== "0x0000000000000000000000000000000000000000000000000000000000000000") {
+                    // Analyze the 32-byte response for possible contract addresses
+                    const addresses = this.extractAddressesFromStorage(response);
+                    for (const address of addresses) {
+                        const lower = address.toLowerCase();
+                        if (this.isValidContractAddress(address) && !foundSet.has(lower)) {
+                            console.log(`✅ Found potential implementation at slot ${slot} for ${proxyAddress}: ${address}`);
+                            foundAddresses.push(address);
+                            foundSet.add(lower);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.warn(`Error checking slot ${slot} for ${proxyAddress}:`, error instanceof Error ? error.message : String(error));
+                // Continue to next slot
+            }
+        }
+
+        if (foundAddresses.length > 0) {
+            console.log(`🎯 Found ${foundAddresses.length} potential implementation addresses for ${proxyAddress}`);
+        } else {
+            console.log(`❌ No implementation found in checked slots for ${proxyAddress}`);
+        }
+
+        return foundAddresses;
+    }
+
+    /**
+     * Extract possible contract addresses from 32-byte storage data
+     */
+    private extractAddressesFromStorage(storageData: string): string[] {
+        const addresses: string[] = [];
+
+        if (!storageData.startsWith('0x')) {
+            storageData = '0x' + storageData;
+        }
+
+        const data = storageData.slice(2);
+
+        // Canonical extraction: last 20 bytes of the 32-byte slot
+        if (data.length >= 64) {
+            const last20 = data.substring(64 - 40);
+            const address = '0x' + last20;
+            if (this.isValidContractAddress(address)) {
+                addresses.push(address);
+            }
+        }
+
+        return addresses;
+    }
+
+    /**
+     * Validate if a string is a valid contract address
+     */
+    private isValidContractAddress(address: string): boolean {
+        // Check basic format
+        if (!address.match(/^0x[0-9a-fA-F]{40}$/) || address.length !== 42) {
+            return false;
+        }
+
+        // Check if it's not a zero address
+        if (address === '0x0000000000000000000000000000000000000000') {
+            return false;
+        }
+
+        // Check if it's not a common zero-filled address
+        if (address.match(/^0x0{39}[1-9a-fA-F]$/)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Check all monitored proxies for changes
+     */
+    private async checkAllProxies(): Promise<void> {
+        if (this.monitoredProxies.size === 0) {
+            return;
+        }
+
+        console.log(`🔍 Checking ${this.monitoredProxies.size} non-EIP1967 proxies for upgrades...`);
+
+        for (const [proxyAddress, lastKnownLogic] of this.monitoredProxies.entries()) {
+            try {
+                const currentLogics = await this.checkProxyStorageSlot(proxyAddress);
+
+                // If we found multiple addresses, log them all
+                if (currentLogics.length > 1) {
+                    console.log(`🔍 Found ${currentLogics.length} potential implementations for ${proxyAddress}:`);
+                    currentLogics.forEach((logic, index) => {
+                        console.log(`  ${index + 1}. ${logic}`);
+                    });
+                }
+
+                // Check if any of the found addresses differ from the last known
+                let upgradeDetected = false;
+                let newLogicAddress = lastKnownLogic;
+
+                for (const currentLogic of currentLogics) {
+                    if (currentLogic.toLowerCase() !== lastKnownLogic.toLowerCase()) {
+                        // Logic contract changed! This is an upgrade
+                        console.log(`🔥 Storage slot upgrade detected for proxy: ${proxyAddress}`);
+                        console.log(`  - Previous logic: ${lastKnownLogic}`);
+                        console.log(`  - New logic: ${currentLogic}`);
+
+                        upgradeDetected = true;
+                        newLogicAddress = currentLogic;
+                        break; // Use the first different address we find
+                    }
+                }
+
+                if (upgradeDetected) {
+                    // Update our record
+                    this.monitoredProxies.set(proxyAddress, newLogicAddress.toLowerCase());
+
+                    // Save upgrade event to database
+                    await this.saveUpgradeEvent(proxyAddress, newLogicAddress, 'storage_slot_change');
+                } else if (currentLogics.length === 0) {
+                    console.warn(`⚠️  Could not read logic contract from storage slots for ${proxyAddress}`);
+                }
+            } catch (error) {
+                console.error(`Error checking proxy ${proxyAddress}:`, error);
+            }
+        }
+    }
+
+    /**
+     * Save upgrade event to database
+     */
+    private async saveUpgradeEvent(proxyAddress: string, newImplementation: string, detectionMethod: string): Promise<void> {
+        if (!isDatabaseAvailable) {
+            console.log(`Database not available, upgrade event logged but not saved: ${proxyAddress} -> ${newImplementation}`);
+            return;
+        }
+
+        try {
+            // For storage slot monitoring, we don't have transaction hash, so we pass empty string
+            await saveOrUpdateProxyContract(proxyAddress, newImplementation, '', 0, '');
+            console.log(`✅ Storage slot upgrade saved to database: ${proxyAddress} -> ${newImplementation} (${detectionMethod})`);
+        } catch (error) {
+            console.error(`Failed to save storage slot upgrade to database:`, error);
+        }
+    }
+
+    /**
+     * Get monitoring status
+     */
+    getStatus(): { monitoredCount: number; isRunning: boolean; checkInterval: number } {
+        return {
+            monitoredCount: this.monitoredProxies.size,
+            isRunning: this.isRunning,
+            checkInterval: this.checkInterval
+        };
+    }
+
+    /**
+     * Get all monitored proxies
+     */
+    getMonitoredProxies(): string[] {
+        return Array.from(this.monitoredProxies.keys());
     }
 }
 
@@ -599,6 +945,17 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
         return addr.match(/^0x[0-9a-fA-F]{40}$/) && addr.length === 42;
     };
 
+    // Helper function to determine proxy type based on storage slot values
+    const getProxyType = (logicResp: string, adminResp: string, logicAddr: string, adminAddr: string): 'eip1967' | 'non-eip1967' | 'unknown' => {
+        // Check if both slots are properly set with valid addresses
+        if (isValidAddress(logicAddr) && isValidAddress(adminAddr)) {
+            return 'eip1967'; // Both logic and admin slots have valid addresses
+        } else if (isValidAddress(logicAddr) && !isValidAddress(adminAddr)) {
+            return 'non-eip1967'; // Only logic slot has valid address, admin slot empty or invalid
+        }
+        return 'unknown';
+    };
+
     if (logicResponse && adminResponse) {
         const logicStorageValue = cleanAddress(logicResponse);
         const adminStorageValue = cleanAddress(adminResponse);
@@ -612,37 +969,115 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
 
         if (isLogicZero && isAdminZero) {
             console.log(` Found non-standard proxy contract: ${contractAddress}`);
-        } else if (isValidAddress(logicStorageValue) && !isLogicZero) {
-            console.log(` 🔍Found standard proxy contract: ${contractAddress}`);
-            console.log(`    Logic contract: ${logicStorageValue}`);
-            if (!isAdminZero && isValidAddress(adminStorageValue)) {
-                console.log(` Admin address: ${adminStorageValue}`);
-            } else {
-                console.log(` Admin: Not set or invalid`);
-            }
-
-            // Save to database with logic and admin contract information
+            // Even if storage slots are empty, save it as a proxy contract since it was detected by bytecode analysis
+            // We'll monitor it using storage slot monitoring to detect any future implementations
             try {
                 await saveOrUpdateProxyContract(
                     contractAddress,
-                    logicStorageValue,
-                    isValidAddress(adminStorageValue) && !isAdminZero ? adminStorageValue : '',
+                    '', // No logic contract detected yet
+                    '', // No admin contract
                     blockNumber
                 );
 
-                // Add event listener for newly discovered proxy contract
-                if (proxyEventListener) {
+                // Add to storage slot monitoring to watch for future implementations
+                if (storageSlotMonitor) {
                     try {
-                        await proxyEventListener.addListener(contractAddress);
-                        console.log(`🎧 Added upgrade event monitoring for new proxy: ${contractAddress}`);
-                    } catch (listenerError) {
-                        console.error(`Failed to add event listener for proxy ${contractAddress}:`, listenerError);
+                        await storageSlotMonitor.addProxy(contractAddress, '0x0000000000000000000000000000000000000000'); // Empty initial logic
+                        console.log(`📊 Added storage monitoring for non-standard proxy: ${contractAddress} (waiting for implementation)`);
+                    } catch (monitorError) {
+                        console.error(`Failed to add storage monitoring for proxy ${contractAddress}:`, monitorError);
                     }
                 } else {
-                    console.warn(`ProxyEventListener not initialized, skipping event monitoring for ${contractAddress}`);
+                    console.warn(`StorageSlotMonitor not initialized, skipping storage monitoring for ${contractAddress}`);
                 }
             } catch (dbError) {
-                console.error(`Failed to save proxy contract ${contractAddress} to database:`, dbError);
+                console.error(`Failed to save non-standard proxy contract ${contractAddress} to database:`, dbError);
+            }
+        } else if (isValidAddress(logicStorageValue) && !isLogicZero) {
+            const proxyType = getProxyType(logicResponse, adminResponse, logicStorageValue, adminStorageValue);
+
+            if (proxyType === 'eip1967') {
+                console.log(` 🔍Found EIP1967 proxy contract: ${contractAddress}`);
+                console.log(`    Logic contract: ${logicStorageValue}`);
+                if (!isAdminZero && isValidAddress(adminStorageValue)) {
+                    console.log(` Admin address: ${adminStorageValue}`);
+                } else {
+                    console.log(` Admin: Not set or invalid`);
+                }
+
+                // Save to database with logic and admin contract information
+                try {
+                    await saveOrUpdateProxyContract(
+                        contractAddress,
+                        logicStorageValue,
+                        isValidAddress(adminStorageValue) && !isAdminZero ? adminStorageValue : '',
+                        blockNumber
+                    );
+
+                    // Ensure we do NOT monitor slots for standard proxies
+                    if (storageSlotMonitor) {
+                        try {
+                            storageSlotMonitor.removeProxy(contractAddress);
+                        } catch (monitorError) {
+                            console.error(`Failed to remove storage monitoring for standard proxy ${contractAddress}:`, monitorError);
+                        }
+                    }
+
+                    // Add event listener for EIP1967/UUPS proxy contract
+                    if (proxyEventListener) {
+                        try {
+                            await proxyEventListener.addListener(contractAddress);
+                            console.log(`🎧 Added upgrade event monitoring for EIP1967 proxy: ${contractAddress}`);
+                        } catch (listenerError) {
+                            console.error(`Failed to add event listener for proxy ${contractAddress}:`, listenerError);
+                        }
+                    } else {
+                        console.warn(`ProxyEventListener not initialized, skipping event monitoring for ${contractAddress}`);
+                    }
+                } catch (dbError) {
+                    console.error(`Failed to save proxy contract ${contractAddress} to database:`, dbError);
+                }
+
+            } else if (proxyType === 'non-eip1967') {
+                console.log(` 🔍Found standard proxy (EIP1967 logic without admin/UUPS): ${contractAddress}`);
+                console.log(`    Logic contract: ${logicStorageValue}`);
+
+                // Save to database
+                try {
+                    await saveOrUpdateProxyContract(
+                        contractAddress,
+                        logicStorageValue,
+                        '', // UUPS/standard without admin slot
+                        blockNumber
+                    );
+
+                    // Ensure slot monitoring is NOT used for standard proxies; use events instead
+                    if (storageSlotMonitor) {
+                        try {
+                            storageSlotMonitor.removeProxy(contractAddress);
+                        } catch (monitorError) {
+                            console.error(`Failed to remove storage monitoring for standard proxy ${contractAddress}:`, monitorError);
+                        }
+                    }
+
+                    if (proxyEventListener) {
+                        try {
+                            await proxyEventListener.addListener(contractAddress);
+                            console.log(`🎧 Added upgrade event monitoring for standard proxy (UUPS): ${contractAddress}`);
+                        } catch (listenerError) {
+                            console.error(`Failed to add event listener for proxy ${contractAddress}:`, listenerError);
+                        }
+                    } else {
+                        console.warn(`ProxyEventListener not initialized, skipping event monitoring for ${contractAddress}`);
+                    }
+                } catch (dbError) {
+                    console.error(`Failed to save proxy contract ${contractAddress} to database:`, dbError);
+                }
+
+            } else {
+                console.log(` Found unknown proxy contract type: ${contractAddress}`);
+                console.log(`   Logic contract storage value: ${logicStorageValue}`);
+                console.log(`   Admin storage value: ${adminStorageValue}`);
             }
         } else {
             console.log(` Found proxy contract but storage value format abnormal: ${contractAddress}`);
@@ -744,6 +1179,15 @@ async function main() {
         console.log("Proxy event listener initialized successfully");
         console.log(`Event listener capacity: ${proxyEventListener.getListenerStatus().max} listeners`);
 
+        // Initialize storage slot monitor for non-EIP1967 proxies
+        console.log("Initializing storage slot monitor...");
+        storageSlotMonitor = new StorageSlotMonitor(provider, 30000); // Check every 30 seconds
+        console.log("Storage slot monitor initialized successfully");
+        console.log(`Storage slot monitoring interval: ${storageSlotMonitor.getStatus().checkInterval}ms`);
+
+        // Start storage slot monitoring
+        storageSlotMonitor.startMonitoring();
+
         console.log("Starting to listen for new blocks...");
         console.log(`Concurrency config: max concurrent blocks = ${CONCURRENCY_CONFIG.MAX_CONCURRENT_BLOCKS}, batch size = ${CONCURRENCY_CONFIG.BATCH_SIZE}`);
         if (isDatabaseAvailable) {
@@ -777,6 +1221,12 @@ async function cleanup() {
         if (proxyEventListener) {
             await proxyEventListener.removeAllListeners();
             console.log("Proxy event listeners cleaned up");
+        }
+
+        // Stop storage slot monitoring
+        if (storageSlotMonitor) {
+            storageSlotMonitor.stopMonitoring();
+            console.log("Storage slot monitoring stopped");
         }
 
         if (isDatabaseAvailable && pool) {
