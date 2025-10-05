@@ -1,6 +1,7 @@
 const { ethers } = require("ethers");
 const { Pool } = require("pg");
 const dotenv = require("dotenv");
+import { isTelegramEnabled, buildUpgradeAlertMessage, sendTelegramAlert } from "../alert/telegram";
 
 // TypeScript type declarations for CommonJS imports
 type EthersType = {
@@ -41,7 +42,19 @@ const DB_CONFIG = {
 // Database availability flag
 let isDatabaseAvailable = false;
 
-const provider = new ethers.JsonRpcProvider(RPC_URL);
+const WS_URL = process.env.WS_URL || process.env.WEBSOCKET_URL || process.env.WEBSOCKET_ENDPOINT || process.env.WS_ENDPOINT;
+let provider: any;
+if (WS_URL) {
+    try {
+        provider = new (ethers as any).WebSocketProvider(WS_URL);
+        console.log(`Using WebSocket provider for events: ${WS_URL}`);
+    } catch (e) {
+        console.warn(`Failed to init WebSocket provider, fallback to HTTP: ${e instanceof Error ? e.message : String(e)}`);
+        provider = new (ethers as any).JsonRpcProvider(RPC_URL);
+    }
+} else {
+    provider = new (ethers as any).JsonRpcProvider(RPC_URL);
+}
 
 // PostgreSQL connection pool (only create if database is available)
 let pool: any = null;
@@ -147,6 +160,22 @@ class ProxyEventListener {
 
             // Save upgrade event to database
             await this.saveUpgradeEvent(proxyAddress, newImplementation, log.transactionHash, log.blockNumber);
+
+            // Telegram alert (non-blocking)
+            try {
+                if (isTelegramEnabled()) {
+                    const message = buildUpgradeAlertMessage({
+                        proxyAddress,
+                        newImplementation,
+                        blockNumber: log.blockNumber,
+                        txHash: log.transactionHash,
+                        detection: 'event',
+                    });
+                    await sendTelegramAlert(message);
+                }
+            } catch (alertErr) {
+                console.warn(`Telegram alert error (event): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
+            }
 
         } catch (error) {
             console.error(`Error handling upgrade event for ${proxyAddress}:`, error);
@@ -525,6 +554,20 @@ class StorageSlotMonitor {
             // For storage slot monitoring, we don't have transaction hash, so we pass empty string
             await saveOrUpdateProxyContract(proxyAddress, newImplementation, '', 0, '');
             console.log(`✅ Storage slot upgrade saved to database: ${proxyAddress} -> ${newImplementation} (${detectionMethod})`);
+
+            // Telegram alert (non-blocking)
+            try {
+                if (isTelegramEnabled()) {
+                    const message = buildUpgradeAlertMessage({
+                        proxyAddress,
+                        newImplementation,
+                        detection: 'storage',
+                    });
+                    await sendTelegramAlert(message);
+                }
+            } catch (alertErr) {
+                console.warn(`Telegram alert error (storage): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
+            }
         } catch (error) {
             console.error(`Failed to save storage slot upgrade to database:`, error);
         }
@@ -972,12 +1015,7 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
             // Even if storage slots are empty, save it as a proxy contract since it was detected by bytecode analysis
             // We'll monitor it using storage slot monitoring to detect any future implementations
             try {
-                await saveOrUpdateProxyContract(
-                    contractAddress,
-                    '', // No logic contract detected yet
-                    '', // No admin contract
-                    blockNumber
-                );
+                // Do NOT insert a blank logic record; only start monitoring without DB write
 
                 // Add to storage slot monitoring to watch for future implementations
                 if (storageSlotMonitor) {
@@ -1013,6 +1051,21 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
                         isValidAddress(adminStorageValue) && !isAdminZero ? adminStorageValue : '',
                         blockNumber
                     );
+
+                    // Telegram alert on discovery for standard proxy
+                    try {
+                        if (isTelegramEnabled()) {
+                            const message = buildUpgradeAlertMessage({
+                                proxyAddress: contractAddress,
+                                newImplementation: logicStorageValue,
+                                blockNumber,
+                                detection: 'discovery',
+                            });
+                            await sendTelegramAlert(message);
+                        }
+                    } catch (alertErr) {
+                        console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
+                    }
 
                     // Ensure we do NOT monitor slots for standard proxies
                     if (storageSlotMonitor) {
@@ -1246,3 +1299,124 @@ main().catch(error => {
     console.error("Error occurred:", error);
     cleanup();
 });
+
+// ----------------------
+// Public API (for HTTP server)
+// ----------------------
+
+export function apiGetStatus() {
+    const listenerStatus = proxyEventListener ? proxyEventListener.getListenerStatus() : { current: 0, max: 0, available: 0 };
+    const monitorStatus = storageSlotMonitor ? storageSlotMonitor.getStatus() : { monitoredCount: 0, isRunning: false, checkInterval: 0 };
+    return {
+        db: { available: isDatabaseAvailable },
+        listener: listenerStatus,
+        storageMonitor: monitorStatus,
+        queue: { length: proxyAddressQueue.length },
+        concurrency: { activeBlockScans, pendingBlocks: pendingBlocks.length },
+        rpc: RPC_URL
+    };
+}
+
+export function apiGetMonitored() {
+    return {
+        eventListener: proxyEventListener ? proxyEventListener.getMonitoredProxies() : [],
+        storageMonitor: storageSlotMonitor ? storageSlotMonitor.getMonitoredProxies() : []
+    };
+}
+
+export async function apiListProxies(limit: number = 50, offset: number = 0) {
+    if (!isDatabaseAvailable || !pool) {
+        return { error: 'database_unavailable' };
+    }
+    const client = await pool.connect();
+    try {
+        const res = await client.query(
+            'SELECT proxy_address, logic_contract, admin_contract, block_number, detected_at, updated_at, contract_type FROM proxy_contracts ORDER BY updated_at DESC LIMIT $1 OFFSET $2',
+            [Math.max(1, Math.min(200, limit)), Math.max(0, offset)]
+        );
+        return res.rows;
+    } finally {
+        client.release();
+    }
+}
+
+export async function apiGetProxy(address: string) {
+    if (!isDatabaseAvailable || !pool) {
+        return { error: 'database_unavailable' };
+    }
+    const client = await pool.connect();
+    try {
+        const res = await client.query(
+            'SELECT proxy_address, logic_contract, admin_contract, block_number, detected_at, updated_at, contract_type FROM proxy_contracts WHERE proxy_address = $1',
+            [address.toLowerCase()]
+        );
+        if (res.rows.length === 0) return null;
+        return res.rows[0];
+    } finally {
+        client.release();
+    }
+}
+
+export async function apiGetHistory(address: string) {
+    if (!isDatabaseAvailable || !pool) {
+        return { error: 'database_unavailable' };
+    }
+    const client = await pool.connect();
+    try {
+        const res = await client.query(
+            'SELECT proxy_address, logic_contract, admin_contract, block_number, detected_at, updated_at, contract_type, upgrade_tx_hash FROM proxy_contracts WHERE proxy_address = $1 ORDER BY detected_at DESC',
+            [address.toLowerCase()]
+        );
+        return res.rows;
+    } finally {
+        client.release();
+    }
+}
+
+export async function apiMonitorAdd(address: string) {
+    // Normalize address
+    let normalized = address;
+    try {
+        normalized = (ethers as any).getAddress(address);
+    } catch {
+        return { error: 'invalid_address' };
+    }
+
+    // Classify and attach appropriate monitoring
+    try {
+        await checkProxyType(normalized, 0);
+        return { ok: true };
+    } catch (e) {
+        // Fallback: best-effort add to storage slot monitor if available
+        if (storageSlotMonitor) {
+            try {
+                await storageSlotMonitor.addProxy(normalized);
+                return { ok: true, fallback: 'storage_monitor' };
+            } catch (e2) {
+                return { error: 'monitor_add_failed', detail: e2 instanceof Error ? e2.message : String(e2) };
+            }
+        }
+        return { error: 'monitor_add_failed', detail: e instanceof Error ? e.message : String(e) };
+    }
+}
+
+export async function apiMonitorRemove(address: string) {
+    let normalized = address;
+    try {
+        normalized = (ethers as any).getAddress(address);
+    } catch {
+        return { error: 'invalid_address' };
+    }
+
+    try {
+        if (proxyEventListener) {
+            await proxyEventListener.removeListener(normalized);
+        }
+        if (storageSlotMonitor) {
+            storageSlotMonitor.removeProxy(normalized);
+        }
+        return { ok: true };
+    } catch (e) {
+        return { error: 'monitor_remove_failed', detail: e instanceof Error ? e.message : String(e) };
+    }
+}
