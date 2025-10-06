@@ -57,13 +57,23 @@ async function getProxyStorage(proxyAddress: string) {
 }
 
 function cleanAddress(value: string): string {
-    const clean = value.startsWith('0x') ? value : '0x' + value;
-    return clean.replace(/^0x0+/, '0x');
+    const input = value || '';
+    const hex = input.startsWith('0x') ? input.slice(2) : input;
+    const normalized = hex.padStart(64, '0');
+    const last40 = normalized.slice(-40);
+    return '0x' + last40;
 }
 
 function isValidAddress(addr: string): boolean {
     const match = addr.match(/^0x[0-9a-fA-F]{40}$/);
     return match !== null && addr.length === 42;
+}
+
+function toTxHash(input: string): string {
+    const anyEthers: any = ethers as any;
+    const keccak = anyEthers.keccak256 ?? anyEthers.utils?.keccak256;
+    const toUtf8Bytes = anyEthers.toUtf8Bytes ?? anyEthers.utils?.toUtf8Bytes;
+    return keccak(toUtf8Bytes(input));
 }
 
 async function saveProxyToDatabase(
@@ -281,8 +291,8 @@ describe('Proxy Scanner Business Logic (Hardhat)', function () {
             // Get current block number and simulate upgrade event data
             const currentBlock = await ethers.provider.getBlockNumber();
             
-            // Create a mock transaction hash for testing purposes
-            const mockTxHash = `0x${Buffer.from(`upgrade_${proxyAddress}_${logicV2Address}_${currentBlock}`).toString('hex').padStart(64, '0')}`;
+            // Create a mock transaction hash for testing purposes (32-byte keccak hash)
+            const mockTxHash = toTxHash(`upgrade_${proxyAddress}_${logicV2Address}_${currentBlock}`);
             
             // Save the upgrade event to database
             const insertedId = await saveProxyToDatabase(dbPool, proxyAddress, logicV2Address, '', currentBlock, mockTxHash);
@@ -315,7 +325,7 @@ describe('Proxy Scanner Business Logic (Hardhat)', function () {
             const existingV2Records = await getProxyFromDatabase(dbPool, proxyAddress, logicV2Address);
             if (existingV2Records.length === 0) {
                 const currentBlock = await ethers.provider.getBlockNumber();
-                const mockTxHash = `0x${Buffer.from(`upgrade_${proxyAddress}_${logicV2Address}_${currentBlock}`).toString('hex').padStart(64, '0')}`;
+                const mockTxHash = toTxHash(`upgrade_${proxyAddress}_${logicV2Address}_${currentBlock}`);
                 await saveProxyToDatabase(dbPool, proxyAddress, logicV2Address, '', currentBlock, mockTxHash);
             }
             
