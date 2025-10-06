@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// 升级的关键点：保持变量顺序与类型不变（存储布局稳定）
+// key points of upgrade: keep variable order and type unchanged (storage layout stable)
 contract LogicV1 {
     uint256 public x;
 

@@ -1,31 +1,29 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title Minimal EIP-1967 Proxy (demo only)
-// for demo only: no access control, anyone can upgrade, do not use in production.
-contract Proxy1967 {
-    // EIP-1967 implementation slot = bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1)
-    bytes32 private constant IMPLEMENTATION_SLOT =
-        0x360894A13BA1A3210667C828492DB98DCA3E2076CC3735A920A3CA505D382BBC;
+/// @notice Minimal proxy (NOT EIP-1967). No events when upgrading. No access control.
+/// Use for demo only.
+contract ProxyNo1967 {
+    // self-defined slot: keccak256("simple.proxy.impl")
+    bytes32 private constant IMPL_SLOT = keccak256("simple.proxy.impl");
 
-    event Upgraded(address indexed newImplementation);
-
-    constructor(address impl_) {
-        _setImplementation(impl_);
+    constructor(address _impl) {
+        require(_impl.code.length > 0, "impl not contract");
+        _setImplementation(_impl);
     }
 
-    function implementation() external view returns (address impl) {
+    function implementation() public view returns (address impl) {
         impl = _getImplementation();
     }
 
-    // ⚠️ for demo only: no access control. In production, at least add onlyOwner/admin.
+    // for demo only: anyone can call upgrade (no events)
     function upgrade(address newImpl) external {
-        require(newImpl.code.length > 0, "not a contract");
+        require(newImpl.code.length > 0, "impl not contract");
         _setImplementation(newImpl);
-        emit Upgraded(newImpl);
+        // note: **no** emit Event
     }
 
-    // --- delegate logic ---
+    // fallback / receive delegate to implementation
     fallback() external payable {
         _delegate(_getImplementation());
     }
@@ -35,14 +33,14 @@ contract Proxy1967 {
     }
 
     function _getImplementation() internal view returns (address impl) {
-        bytes32 slot = IMPLEMENTATION_SLOT;
+        bytes32 slot = IMPL_SLOT;
         assembly {
             impl := sload(slot)
         }
     }
 
     function _setImplementation(address newImpl) internal {
-        bytes32 slot = IMPLEMENTATION_SLOT;
+        bytes32 slot = IMPL_SLOT;
         assembly {
             sstore(slot, newImpl)
         }
@@ -50,11 +48,8 @@ contract Proxy1967 {
 
     function _delegate(address impl) internal {
         assembly {
-            // copy calldata
             calldatacopy(0, 0, calldatasize())
-            // delegatecall to implementation contract
             let result := delegatecall(gas(), impl, 0, calldatasize(), 0, 0)
-            // copy return data
             returndatacopy(0, 0, returndatasize())
             switch result
             case 0 { revert(0, returndatasize()) }

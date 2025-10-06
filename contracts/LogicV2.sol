@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// 保持与 V1 相同的前置变量布局（这里仍然只有 x）
+// keep the same variable layout as V1 (here still only x)
 contract LogicV2 {
     uint256 public x;
 
