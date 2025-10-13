@@ -9,6 +9,7 @@ export interface AnalyzeResult {
     status: 'completed' | 'failed';
     rawOutput: string;
     parsed?: any;
+    sources?: Record<string, string>;
 }
 
 function writeSourcesToTmp(sources: Record<string, string>): string {
@@ -75,6 +76,7 @@ export async function analyzeContract(address: string): Promise<AnalyzeResult> {
             status: 'completed',
             rawOutput: raw,
             parsed,
+            sources: verified.sources,
         };
         console.log(`[analyzeContract] ${addr} -> completed`);
 

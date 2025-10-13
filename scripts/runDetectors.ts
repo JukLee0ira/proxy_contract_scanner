@@ -1,10 +1,16 @@
 import { analyzeContract } from '../src/services/analyzer';
-import { runDetectors } from '../src/detectors';
-import { HelloDetector } from '../src/detectors/hello';
+import { runDetectors, selectDetectors } from '../src/detectors';
 
 async function main() {
     const args = process.argv.slice(2).map(s => s.trim()).filter(Boolean);
-    const addr = process.env.ADDRESS || args[0];
+    const kv: Record<string, string> = Object.fromEntries(
+        args.filter(a => a.includes('=')).map(a => {
+            const [k, ...rest] = a.split('=');
+            return [k, rest.join('=')];
+        })
+    );
+    const addrArg = args.find(a => /^0x[0-9a-fA-F]{40}$/.test(a));
+    const addr = process.env.ADDRESS || addrArg;
     if (!addr) {
         console.error('ADDRESS required. Usage: npm run detect:hello -- 0xYourAddress OR ADDRESS=0xYourAddress npm run detect:hello');
         process.exit(1);
@@ -14,7 +20,13 @@ async function main() {
         console.error('Analysis failed or no JSON available');
         process.exit(2);
     }
-    const findings = await runDetectors({ address: addr.toLowerCase(), slither: analysis.parsed }, [HelloDetector]);
+    const detArg = process.env.DETECTORS || kv['detectors'] || '';
+    const keys = detArg ? detArg.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const detectors = selectDetectors(keys);
+    const findings = await runDetectors(
+        { address: addr.toLowerCase(), slither: analysis.parsed, sources: analysis.sources },
+        detectors
+    );
     console.log(JSON.stringify({ address: addr.toLowerCase(), findings }, null, 2));
 }
 

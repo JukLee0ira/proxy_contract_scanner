@@ -16,6 +16,8 @@
     "scan:initial": "ts-node scripts/initialScan.ts",
     "print:source": "ts-node scripts/printSource.ts",
     "detect:hello": "ts-node scripts/runDetectors.ts",
+    "detect:selfdestruct": "ts-node scripts/runDetectors.ts",
+    "detect:all": "ts-node scripts/runDetectors.ts",
     "scan": "ts-node src/demo/proxyScannerDemo.ts --scan",
     "dev": "nodemon --exec ts-node src/demo/proxyScannerDemo.ts",
     "build": "tsc",
