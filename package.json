@@ -14,6 +14,7 @@
     "start": "ts-node src/demo/proxyScannerDemo.ts",
     "analyze:one": "ts-node scripts/analyzeOne.ts",
     "scan:initial": "ts-node scripts/initialScan.ts",
+    "print:source": "ts-node scripts/printSource.ts",
     "scan": "ts-node src/demo/proxyScannerDemo.ts --scan",
     "dev": "nodemon --exec ts-node src/demo/proxyScannerDemo.ts",
     "build": "tsc",
