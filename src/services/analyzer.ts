@@ -66,10 +66,15 @@ export async function analyzeContract(address: string): Promise<AnalyzeResult> {
         const raw = await runSlitherDocker(dir);
 
         // Slither --json writes to file; some images also echo report lines. We keep raw stdout/stderr for now.
+        let parsed: any = undefined;
+        try {
+            parsed = JSON.parse(raw);
+        } catch {}
         const result: AnalyzeResult = {
             tool: 'slither',
             status: 'completed',
             rawOutput: raw,
+            parsed,
         };
         console.log(`[analyzeContract] ${addr} -> completed`);
 
