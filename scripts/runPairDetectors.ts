@@ -1,6 +1,7 @@
 import { analyzeContract } from '../src/services/analyzer';
 import { runPairDetectors } from '../src/detectors/pair';
 import { HelloPairDetector } from '../src/detectors/pair/helloPair';
+import { UpgradeGovernancePairDetector } from '../src/detectors/pair/upgradeGovernance';
 
 function pickAddress(args: string[], idx: number): string | undefined {
     const pos = args.filter(a => !a.includes('='))[idx];
@@ -33,12 +34,20 @@ async function main() {
         process.exit(2);
     }
 
+    const kvDet = kv['detectors'] || process.env.DETECTORS || '';
+    const detKeys = kvDet ? kvDet.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const registry: Record<string, any> = {
+        'hello-pair': HelloPairDetector,
+        'upgrade-governance': UpgradeGovernancePairDetector,
+    };
+    const selected = detKeys.length ? detKeys.map(k => registry[k]).filter(Boolean) : Object.values(registry);
+
     const findings = await runPairDetectors(
         {
             proxy: { address: proxy.toLowerCase(), slither: proxyAnalysis.parsed, sources: proxyAnalysis.sources },
             logic: { address: logic.toLowerCase(), slither: logicAnalysis.parsed, sources: logicAnalysis.sources },
         },
-        [HelloPairDetector]
+        selected
     );
 
     console.log(JSON.stringify({ proxy: proxy.toLowerCase(), logic: logic.toLowerCase(), findings }, null, 2));
