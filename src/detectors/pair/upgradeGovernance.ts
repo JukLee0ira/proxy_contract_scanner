@@ -1,12 +1,14 @@
 import { PairDetector, PairDetectorContext, PairDetectorFinding } from './index';
 import { ethers } from 'ethers';
 
-async function simulateUpgradeCall(provider: ethers.Provider, proxy: string, newImpl: string, from: string): Promise<{ ok: boolean; reason?: string }>{
-    const iface = new ethers.Interface(['function upgradeTo(address newImplementation)']);
-    const data = iface.encodeFunctionData('upgradeTo', [newImpl]);
+async function tryCall(
+    provider: ethers.Provider,
+    to: string,
+    from: string,
+    data: string
+): Promise<{ ok: boolean; reason?: string }>{
     try {
-        const rv = await provider.call({ to: proxy, from, data });
-        // If call didn't revert, rv is hex data (often 0x). Treat as success (unprotected path)
+        await provider.call({ to, from, data });
         return { ok: true };
     } catch (e: any) {
         const reason = e?.shortMessage || e?.message || (typeof e?.error?.message === 'string' ? e.error.message : undefined);
@@ -25,20 +27,39 @@ export const UpgradeGovernancePairDetector: PairDetector = {
         const logic = ctx.logic.address;
         const attacker = '0x000000000000000000000000000000000000dEaD';
 
-        const sim = await simulateUpgradeCall(provider, proxy, logic, attacker);
-        if (sim.ok) {
+        // Try a set of common upgrade entrypoints on the proxy itself
+        const candidates: { name: string; fragment: string; args: any[] }[] = [
+            { name: 'upgradeTo(address)', fragment: 'function upgradeTo(address newImplementation)', args: [logic] },
+            { name: 'upgrade(address)', fragment: 'function upgrade(address newImpl)', args: [logic] },
+            { name: 'upgradeToAndCall(address,bytes)', fragment: 'function upgradeToAndCall(address newImplementation, bytes data)', args: [logic, '0x'] },
+        ];
+
+        let unprotected: { method: string } | undefined;
+        let lastReason: string | undefined;
+        for (const c of candidates) {
+            const iface = new ethers.Interface([c.fragment]);
+            const data = iface.encodeFunctionData(c.fragment.split(' ')[1].split('(')[0], c.args);
+            const res = await tryCall(provider, proxy, attacker, data);
+            if (res.ok) {
+                unprotected = { method: c.name };
+                break;
+            }
+            lastReason = res.reason || lastReason;
+        }
+
+        if (unprotected) {
             findings.push({
                 id: 'upgrade-unprotected',
-                title: 'upgradeTo is callable by non-admin (potentially unprotected)',
+                title: 'Proxy upgrade is callable by non-admin (unprotected upgrade path)',
                 severity: 'high',
-                metadata: { proxy, logic, from: attacker }
+                metadata: { proxy, logic, from: attacker, methodTried: unprotected.method }
             });
         } else {
             findings.push({
                 id: 'upgrade-protected',
-                title: 'upgradeTo reverted for non-admin (likely protected)',
+                title: 'Proxy upgrade entrypoints reverted for non-admin (likely protected)',
                 severity: 'info',
-                metadata: { proxy, logic, from: attacker, reason: sim.reason }
+                metadata: { proxy, logic, from: attacker, reason: lastReason }
             });
         }
 

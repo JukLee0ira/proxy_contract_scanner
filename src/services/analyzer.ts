@@ -42,21 +42,22 @@ async function runSlitherDocker(sourceDir: string): Promise<string> {
         '-v', `${sourceDir}:/out`,
         image, 'slither', '/src', '--json', '/out/slither.json'
     ];
-    await new Promise<void>((resolve, reject) => {
+
+    let exitCode: number | null = null;
+    let stderr = '';
+    await new Promise<void>((resolve) => {
         const proc = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-        let stderr = '';
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
-        proc.on('exit', (code) => {
-            if (code === 0) {
-                resolve();
-            } else {
-                reject(new Error(`slither_exit_${code}: ${stderr}`));
-            }
-        });
-        proc.on('error', (err) => reject(err));
+        proc.on('exit', (code) => { exitCode = code; resolve(); });
+        proc.on('error', () => { exitCode = 1; resolve(); });
     });
-    const raw = fs.readFileSync(outFile, 'utf8');
-    return raw;
+
+    if (fs.existsSync(outFile)) {
+        const raw = fs.readFileSync(outFile, 'utf8');
+        return raw;
+    }
+
+    throw new Error(`slither_exit_${exitCode ?? 'unknown'}: ${stderr}`);
 }
 
 export async function analyzeContract(address: string): Promise<AnalyzeResult> {
