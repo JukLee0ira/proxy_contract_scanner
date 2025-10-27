@@ -19,6 +19,37 @@ export const UnprotectedSelfdestructDetector: Detector = {
     name: 'unprotected-selfdestruct',
     run(ctx: DetectorContext): DetectorFinding[] {
         const findings: DetectorFinding[] = [];
+        // 0) Bytecode-only quick scan (NO_SOURCE mode): detect presence of SELFDESTRUCT opcode (0xFF)
+        if (ctx.bytecode && typeof ctx.bytecode === 'string' && ctx.bytecode.length > 2) {
+            const hex = ctx.bytecode.startsWith('0x') ? ctx.bytecode.slice(2) : ctx.bytecode;
+            const n = hex.length;
+            let i = 0;
+            let hasSelfdestruct = false;
+            while (i + 2 <= n) {
+                const opcodeHex = hex.slice(i, i + 2);
+                const opcode = parseInt(opcodeHex, 16);
+                i += 2;
+                if (Number.isNaN(opcode)) break;
+                // PUSH1..PUSH32: 0x60..0x7f, skip immediate bytes
+                if (opcode >= 0x60 && opcode <= 0x7f) {
+                    const pushLen = opcode - 0x5f; // 1..32
+                    i += pushLen * 2;
+                    continue;
+                }
+                if (opcode === 0xff) { // SELFDESTRUCT
+                    hasSelfdestruct = true;
+                    break;
+                }
+            }
+            if (hasSelfdestruct) {
+                findings.push({
+                    id: 'selfdestruct-bytecode',
+                    title: 'selfdestruct opcode present in bytecode',
+                    severity: 'info',
+                    metadata: { address: ctx.address },
+                });
+            }
+        }
         // 1) Quick source scan fallback: if any source contains selfdestruct, flag it as info
         if (ctx.sources) {
             for (const [file, content] of Object.entries(ctx.sources)) {

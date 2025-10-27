@@ -10,6 +10,7 @@ export interface DetectorContext {
     address: string;
     slither: any; // parsed slither JSON
     sources?: Record<string, string>;
+    bytecode?: string;
 }
 
 export interface Detector {
