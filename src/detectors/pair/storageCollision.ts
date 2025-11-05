@@ -1,6 +1,10 @@
 import { PairDetector, PairDetectorContext, PairDetectorFinding } from './index';
 import { ethers } from 'ethers';
 
+function detectStorageCollisionFromBytecode(_proxyBytecode?: string, _logicBytecode?: string): undefined {
+    return undefined;
+}
+
 function concatSources(sources?: Record<string, string>): string {
     if (!sources) return '';
     return Object.values(sources).join('\n\n');
@@ -63,6 +67,27 @@ export const StorageCollisionPairDetector: PairDetector = {
     name: 'storage-collision',
     async run(ctx: PairDetectorContext): Promise<PairDetectorFinding[]> {
         const findings: PairDetectorFinding[] = [];
+
+        // NO_SOURCE stub: placeholder for bytecode-only analysis
+        const proxyHasSrc = !!(ctx.proxy.sources && Object.values(ctx.proxy.sources).some((c) => (c || '').trim().length > 0));
+        const logicHasSrc = !!(ctx.logic.sources && Object.values(ctx.logic.sources).some((c) => (c || '').trim().length > 0));
+        const proxyBytecode = (ctx.proxy as any).bytecode as string | undefined;
+        const logicBytecode = (ctx.logic as any).bytecode as string | undefined;
+        if ((!proxyHasSrc && !logicHasSrc) && (proxyBytecode || logicBytecode)) {
+            detectStorageCollisionFromBytecode(proxyBytecode, logicBytecode);
+            findings.push({
+                id: 'storage-collision-nosource-stub',
+                title: 'NO_SOURCE: storage-collision bytecode analyzer stub in place',
+                severity: 'info',
+                metadata: {
+                    proxyAddress: ctx.proxy.address,
+                    logicAddress: ctx.logic.address,
+                    hasProxyBytecode: !!proxyBytecode,
+                    hasLogicBytecode: !!logicBytecode,
+                } as any,
+            });
+            return findings;
+        }
 
         const proxySourceText = concatSources(ctx.proxy.sources);
         const logicSourceText = concatSources(ctx.logic.sources);

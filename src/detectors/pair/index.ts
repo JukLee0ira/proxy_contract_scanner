@@ -7,8 +7,8 @@ export interface PairDetectorFinding {
 }
 
 export interface PairDetectorContext {
-    proxy: { address: string; slither: any; sources?: Record<string, string> };
-    logic: { address: string; slither: any; sources?: Record<string, string> };
+    proxy: { address: string; slither: any; sources?: Record<string, string>; bytecode?: string };
+    logic: { address: string; slither: any; sources?: Record<string, string>; bytecode?: string };
 }
 
 export interface PairDetector {
