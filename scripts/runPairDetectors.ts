@@ -4,6 +4,7 @@ import { HelloPairDetector } from '../src/detectors/pair/helloPair';
 import { UpgradeGovernancePairDetector } from '../src/detectors/pair/upgradeGovernance';
 import { getVerifiedSource } from '../src/clients/etherscan';
 import { StorageCollisionPairDetector } from '../src/detectors/pair/storageCollision';
+import { InitializerMistakesPairDetector } from '../src/detectors/pair/initializerMistakes';
 import { ethers } from 'ethers';
 
 function pickAddress(args: string[], idx: number): string | undefined {
@@ -105,6 +106,7 @@ async function main() {
         'hello-pair': HelloPairDetector,
         'upgrade-governance': UpgradeGovernancePairDetector,
         'storage-collision': StorageCollisionPairDetector,
+        'initializer_mistakes': InitializerMistakesPairDetector,
     };
     const selected = detKeys.length ? detKeys.map(k => registry[k]).filter(Boolean) : Object.values(registry);
 
