@@ -6,6 +6,7 @@ import { getVerifiedSource } from '../src/clients/etherscan';
 import { StorageCollisionPairDetector } from '../src/detectors/pair/storageCollision';
 import { InitializerMistakesPairDetector } from '../src/detectors/pair/initializerMistakes';
 import { ethers } from 'ethers';
+import { Pool } from 'pg';
 
 function pickAddress(args: string[], idx: number): string | undefined {
     const pos = args.filter(a => !a.includes('='))[idx];
@@ -21,10 +22,47 @@ async function main() {
             return [k, rest.join('=')];
         })
     );
-    const proxy = process.env.PROXY || kv['proxy'] || pickAddress(args, 0);
-    const logic = process.env.LOGIC || kv['logic'] || pickAddress(args, 1);
+    let proxy = process.env.PROXY || kv['proxy'] || pickAddress(args, 0);
+    let logic = process.env.LOGIC || kv['logic'] || pickAddress(args, 1);
+
+    const wantFromDb = (process.env.FROM_DB === '1') || (kv['FROM_DB'] === '1') || (kv['from_db'] === '1') || (kv['latest'] === '1');
+    if ((!proxy || !logic) || wantFromDb) {
+        try {
+            const pool = new Pool({
+                host: process.env.DB_HOST || 'localhost',
+                port: parseInt(process.env.DB_PORT || '5432'),
+                database: process.env.DB_NAME || 'mydb',
+                user: process.env.DB_USER || 'dbuser',
+                password: process.env.DB_PASSWORD || process.env.DB_PASS || '',
+            });
+            const client = await pool.connect();
+            try {
+                const res = await client.query(`
+                    SELECT proxy_address, logic_contract, detected_at
+                    FROM proxy_contracts
+                    WHERE proxy_address IS NOT NULL AND logic_contract IS NOT NULL
+                    ORDER BY detected_at DESC
+                    LIMIT 1
+                `);
+                if (res.rows.length > 0) {
+                    const row = res.rows[0];
+                    proxy = row.proxy_address;
+                    logic = row.logic_contract;
+                    console.log(`[pair] Loaded latest pair from DB: proxy=${proxy} logic=${logic} detected_at=${row.detected_at}`);
+                } else {
+                    console.warn('[pair] No records found in proxy_contracts table.');
+                }
+            } finally {
+                client.release();
+                await pool.end().catch(() => void 0);
+            }
+        } catch (e: any) {
+            console.warn(`[pair] Failed to read latest pair from DB: ${e?.message || String(e)}`);
+        }
+    }
+
     if (!proxy || !logic) {
-        console.error('PROXY and LOGIC required. Usage: npm run detect:pair -- proxy=0xProxy logic=0xLogic OR npm run detect:pair -- 0xProxy 0xLogic');
+        console.error('PROXY and LOGIC required. Provide via env/args or enable FROM_DB=1 to load latest from DB.\nUsage: npm run detect:pair -- proxy=0xProxy logic=0xLogic OR npm run detect:pair -- 0xProxy 0xLogic OR FROM_DB=1 npm run detect:pair');
         process.exit(1);
     }
 
@@ -67,13 +105,19 @@ async function main() {
             provider.getCode(proxy),
             provider.getCode(logic),
         ]);
-        if (!proxyCode || proxyCode === '0x') {
-            console.error('[pair] No bytecode found at proxy address (getCode returned 0x). Check RPC and proxy address.');
-            process.exit(2);
-        }
-        if (!logicCode || logicCode === '0x') {
-            console.error('[pair] No bytecode found at logic address (getCode returned 0x). Check RPC and logic address.');
-            process.exit(2);
+        const allowEmptyCode = (process.env.ALLOW_EMPTY_CODE === '1') || (kv['ALLOW_EMPTY_CODE'] === '1') || (kv['allow_empty_code'] === '1');
+        if (!allowEmptyCode) {
+            if (!proxyCode || proxyCode === '0x') {
+                console.error('[pair] No bytecode found at proxy address (getCode returned 0x). Check RPC and proxy address.');
+                process.exit(2);
+            }
+            if (!logicCode || logicCode === '0x') {
+                console.error('[pair] No bytecode found at logic address (getCode returned 0x). Check RPC and logic address.');
+                process.exit(2);
+            }
+        } else {
+            if (!proxyCode || proxyCode === '0x') console.warn('[pair] Warning: proxy bytecode is empty; continuing due to ALLOW_EMPTY_CODE=1 (demo mode).');
+            if (!logicCode || logicCode === '0x') console.warn('[pair] Warning: logic bytecode is empty; continuing due to ALLOW_EMPTY_CODE=1 (demo mode).');
         }
         console.log('[pair] NO_SOURCE=1: using bytecode for analysis');
         ctx = {

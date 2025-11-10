@@ -2,6 +2,13 @@ const { ethers } = require("ethers");
 const { Pool } = require("pg");
 const dotenv = require("dotenv");
 import { isTelegramEnabled, buildUpgradeAlertMessage, sendTelegramAlert } from "../alert/telegram";
+import { analyzeContract } from "../services/analyzer";
+import { getVerifiedSource } from "../clients/etherscan";
+import { runPairDetectors } from "../detectors/pair";
+import { HelloPairDetector } from "../detectors/pair/helloPair";
+import { UpgradeGovernancePairDetector } from "../detectors/pair/upgradeGovernance";
+import { StorageCollisionPairDetector } from "../detectors/pair/storageCollision";
+import { InitializerMistakesPairDetector } from "../detectors/pair/initializerMistakes";
 
 // TypeScript type declarations for CommonJS imports
 type EthersType = {
@@ -1205,6 +1212,17 @@ async function processBlock(blockNumber: number) {
 
 async function main() {
     try {
+        // Parse mode flags
+        const args: string[] = process.argv.slice(2).map((s: string) => s.trim()).filter(Boolean);
+        const kv: Record<string, string> = Object.fromEntries(
+            args.filter(a => a.includes('=')).map(a => {
+                const [k, ...rest] = a.split('=');
+                return [k, rest.join('=')];
+            })
+        );
+        const modeArg = kv['mode'] || (args.includes('--analyze') ? 'listen-analyze' : undefined) || process.env.MODE;
+        const analyzeEnabled = (process.env.ANALYZE === '1') || (modeArg === 'analyze') || (modeArg === 'listen-analyze');
+
         console.log("Initializing database...");
         console.log("Database config:", {
             host: DB_CONFIG.host,
@@ -1240,6 +1258,18 @@ async function main() {
 
         // Start storage slot monitoring
         storageSlotMonitor.startMonitoring();
+
+        // If analyze mode is enabled, run pair analysis once at startup using latest DB record
+        if (analyzeEnabled) {
+            console.log("[analyze] listen-and-analyze mode enabled. Fetching latest pair from DB and running checks...");
+            try {
+                await analyzeLatestPairFromDB();
+            } catch (e: any) {
+                console.error(`[analyze] Failed to analyze latest pair: ${e?.message || String(e)}`);
+            }
+        } else {
+            console.log("[analyze] listen-only mode (no startup analysis). Enable with --mode=listen-analyze or ANALYZE=1");
+        }
 
         console.log("Starting to listen for new blocks...");
         console.log(`Concurrency config: max concurrent blocks = ${CONCURRENCY_CONFIG.MAX_CONCURRENT_BLOCKS}, batch size = ${CONCURRENCY_CONFIG.BATCH_SIZE}`);
@@ -1419,4 +1449,132 @@ export async function apiMonitorRemove(address: string) {
     } catch (e) {
         return { error: 'monitor_remove_failed', detail: e instanceof Error ? e.message : String(e) };
     }
+}
+
+// ----------------------
+// Pair analysis helpers
+// ----------------------
+
+async function fetchLatestPairFromDB(): Promise<{ proxy: string; logic: string } | null> {
+    if (!isDatabaseAvailable || !pool) {
+        console.warn("[analyze] Database is not available; cannot fetch latest pair.");
+        return null;
+    }
+    const client = await pool.connect();
+    try {
+        const res = await client.query(`
+            SELECT proxy_address, logic_contract, detected_at
+            FROM proxy_contracts
+            WHERE proxy_address IS NOT NULL AND logic_contract IS NOT NULL
+            ORDER BY detected_at DESC
+            LIMIT 1
+        `);
+        if (res.rows.length === 0) {
+            console.warn("[analyze] No pair records found in proxy_contracts.");
+            return null;
+        }
+        const row = res.rows[0];
+        const proxy: string = (row.proxy_address || '').toLowerCase();
+        const logic: string = (row.logic_contract || '').toLowerCase();
+        console.log(`[analyze] Latest pair from DB: proxy=${proxy} logic=${logic} detected_at=${row.detected_at}`);
+        return { proxy, logic };
+    } finally {
+        client.release();
+    }
+}
+
+async function analyzeOrFetchSources(address: string): Promise<{ slither: any; sources?: Record<string, string> }> {
+    console.log(`[analyze] analyzeContract -> ${address}`);
+    try {
+        const analysis = await analyzeContract(address);
+        if (analysis.status === 'completed' && analysis.parsed) {
+            const srcCount = analysis.sources ? Object.keys(analysis.sources).length : 0;
+            const nonEmpty = analysis.sources ? Object.values(analysis.sources).filter((c: string) => (c || '').trim().length > 0).length : 0;
+            console.log(`[analyze] Slither OK for ${address} | sources=${srcCount} nonEmpty=${nonEmpty}`);
+            return { slither: analysis.parsed, sources: analysis.sources };
+        }
+        console.warn(`[analyze] Slither FAILED for ${address} | reason=${(analysis as any)?.rawOutput || 'no_json'} | fallback to explorer`);
+    } catch (e: any) {
+        console.warn(`[analyze] analyzeContract threw for ${address} | ${e?.message || String(e)}`);
+    }
+    try {
+        const verified = await getVerifiedSource(address);
+        const srcCount = Object.keys(verified.sources || {}).length;
+        const nonEmpty = Object.values(verified.sources || {}).filter((c: string) => (c || '').trim().length > 0).length;
+        console.log(`[analyze] Explorer source fetched for ${address} | files=${srcCount} nonEmpty=${nonEmpty}`);
+        return { slither: {}, sources: verified.sources };
+    } catch (e: any) {
+        console.error(`[analyze] Explorer fetch FAILED for ${address} | ${e?.message || String(e)}`);
+        throw e;
+    }
+}
+
+async function buildPairContext(proxy: string, logic: string): Promise<{ ctx: any; used: 'sources' | 'bytecode' } | null> {
+    // Try source-based context first
+    try {
+        const [proxyData, logicData] = await Promise.all([
+            analyzeOrFetchSources(proxy),
+            analyzeOrFetchSources(logic),
+        ]);
+        const proxyNonEmpty = proxyData.sources ? Object.values(proxyData.sources).filter((c: string) => (c || '').trim().length > 0).length : 0;
+        const logicNonEmpty = logicData.sources ? Object.values(logicData.sources).filter((c: string) => (c || '').trim().length > 0).length : 0;
+        console.log(`[analyze] Prepared contexts | proxy{ slither=${!!proxyData.slither}, nonEmpty=${proxyNonEmpty} } | logic{ slither=${!!logicData.slither}, nonEmpty=${logicNonEmpty} }`);
+        if (proxyNonEmpty > 0 && logicNonEmpty > 0) {
+            return {
+                ctx: {
+                    proxy: { address: proxy, slither: proxyData.slither, sources: proxyData.sources },
+                    logic: { address: logic, slither: logicData.slither, sources: logicData.sources },
+                },
+                used: 'sources',
+            };
+        }
+        console.warn("[analyze] One or both contracts lack non-empty sources; will try bytecode path.");
+    } catch {
+        // fallthrough to bytecode
+    }
+
+    // Fallback to bytecode context
+    const rpcUrl = process.env.RPC_URL || process.env.ETH_RPC_URL || RPC_URL;
+    const bytecodeProvider = new (ethers as any).JsonRpcProvider(rpcUrl);
+    const [proxyCode, logicCode] = await Promise.all([
+        bytecodeProvider.getCode(proxy),
+        bytecodeProvider.getCode(logic),
+    ]);
+    if (!proxyCode || proxyCode === '0x') {
+        console.error('[analyze] No bytecode at proxy address. Aborting analysis.');
+        return null;
+    }
+    if (!logicCode || logicCode === '0x') {
+        console.error('[analyze] No bytecode at logic address. Aborting analysis.');
+        return null;
+    }
+    console.log('[analyze] Using bytecode context (NO_SOURCE path).');
+    return {
+        ctx: {
+            proxy: { address: proxy, slither: {}, bytecode: proxyCode },
+            logic: { address: logic, slither: {}, bytecode: logicCode },
+        },
+        used: 'bytecode',
+    };
+}
+
+async function runAllPairDetectors(ctx: any): Promise<any[]> {
+    const detectors: any[] = [
+        HelloPairDetector,
+        UpgradeGovernancePairDetector,
+        StorageCollisionPairDetector,
+        InitializerMistakesPairDetector,
+    ];
+    console.log(`[analyze] Detectors selected: ${detectors.map(d => d.name || 'unknown').join(', ')}`);
+    const findings = await runPairDetectors(ctx, detectors as any);
+    return findings;
+}
+
+async function analyzeLatestPairFromDB(): Promise<void> {
+    const latest = await fetchLatestPairFromDB();
+    if (!latest) return;
+    const built = await buildPairContext(latest.proxy, latest.logic);
+    if (!built) return;
+    const findings = await runAllPairDetectors(built.ctx);
+    console.log(JSON.stringify({ proxy: latest.proxy, logic: latest.logic, sourceMode: built.used, findings }, null, 2));
 }
