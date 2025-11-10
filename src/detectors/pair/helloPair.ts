@@ -5,7 +5,7 @@ export const HelloPairDetector: PairDetector = {
     run(ctx: PairDetectorContext): PairDetectorFinding[] {
         return [{
             id: 'hello-pair-1',
-            title: 'Hello from pair detector',
+            title: 'System: pair detector operational',
             severity: 'info',
             metadata: {
                 proxy: ctx.proxy.address,

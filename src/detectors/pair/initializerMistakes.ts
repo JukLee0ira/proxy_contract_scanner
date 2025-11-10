@@ -76,8 +76,8 @@ export const InitializerMistakesPairDetector: PairDetector = {
         findings.push({
             id: 'initializer-mistakes-static',
             title: staticRisky
-                ? 'Static: initialize function exposed without initializer protection'
-                : 'Static: no public initialize exposure detected',
+                ? 'Initializer exposure: public initialize without initializer protection'
+                : 'Initializer exposure: no public initialize detected',
             severity: staticRisky ? 'high' : 'info',
             metadata: {
                 logicAddress: logicAddr,
@@ -102,8 +102,8 @@ export const InitializerMistakesPairDetector: PairDetector = {
             findings.push({
                 id: confirmedUninitialized ? 'initializer-mistakes-onchain-confirmed' : 'initializer-mistakes-onchain-mitigated',
                 title: confirmedUninitialized
-                    ? 'On-chain: implementation uninitialized (slot 0)'
-                    : 'On-chain: initialized state present at slot 0',
+                    ? 'Initializer exposure: implementation uninitialized (slot 0)'
+                    : 'Initializer exposure: initialized state present (slot 0)',
                 severity: confirmedUninitialized ? 'high' : 'low',
                 metadata: {
                     logicAddress: logicAddr,
