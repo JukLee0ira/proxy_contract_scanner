@@ -1146,6 +1146,18 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
                         console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                     }
 
+                    // Trigger security analysis for discovered proxy if analyze mode is enabled
+                    if (analyzeModeEnabled) {
+                        try {
+                            console.log(`[analyze] Triggering checks (discovery) for proxy pair proxy=${contractAddress} logic=${logicStorageValue}`);
+                            // Fire and forget; do not block the discovery process
+                            analyzePairAddresses(contractAddress.toLowerCase(), logicStorageValue.toLowerCase(), selectedPairCheckKeys)
+                                .catch((e) => console.error(`[analyze] Background analysis failed for discovered proxy ${contractAddress}:`, e instanceof Error ? e.message : String(e)));
+                        } catch (e) {
+                            console.error(`[analyze] Failed to schedule analysis for discovered proxy ${contractAddress}:`, e instanceof Error ? e.message : String(e));
+                        }
+                    }
+
                     // Ensure we do NOT monitor slots for standard proxies
                     if (storageSlotMonitor) {
                         try {
@@ -1182,6 +1194,33 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
                         '', // UUPS/standard without admin slot
                         blockNumber
                     );
+
+                    // Telegram alert on discovery for non-EIP1967 proxy
+                    try {
+                        if (isTelegramEnabled()) {
+                            const message = buildUpgradeAlertMessage({
+                                proxyAddress: contractAddress,
+                                newImplementation: logicStorageValue,
+                                blockNumber,
+                                detection: 'discovery',
+                            });
+                            await sendTelegramAlert(message);
+                        }
+                    } catch (alertErr) {
+                        console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
+                    }
+
+                    // Trigger security analysis for discovered non-EIP1967 proxy if analyze mode is enabled
+                    if (analyzeModeEnabled) {
+                        try {
+                            console.log(`[analyze] Triggering checks (discovery) for non-EIP1967 proxy pair proxy=${contractAddress} logic=${logicStorageValue}`);
+                            // Fire and forget; do not block the discovery process
+                            analyzePairAddresses(contractAddress.toLowerCase(), logicStorageValue.toLowerCase(), selectedPairCheckKeys)
+                                .catch((e) => console.error(`[analyze] Background analysis failed for discovered non-EIP1967 proxy ${contractAddress}:`, e instanceof Error ? e.message : String(e)));
+                        } catch (e) {
+                            console.error(`[analyze] Failed to schedule analysis for discovered non-EIP1967 proxy ${contractAddress}:`, e instanceof Error ? e.message : String(e));
+                        }
+                    }
 
                     // Ensure slot monitoring is NOT used for standard proxies; use events instead
                     if (storageSlotMonitor) {
