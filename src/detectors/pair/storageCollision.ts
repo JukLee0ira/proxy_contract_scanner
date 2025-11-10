@@ -359,7 +359,7 @@ export const StorageCollisionPairDetector: PairDetector = {
 
         findings.push({
             id: 'storage-collision-stage1',
-            title: 'Stage1: Static layout collision heuristic',
+            title: 'Static: storage layout collision heuristic (stage 1)',
             severity: stage1Potential ? 'high' : 'info',
             metadata: {
                 proxyAddress: ctx.proxy.address,
@@ -409,8 +409,8 @@ export const StorageCollisionPairDetector: PairDetector = {
 
         findings.push({
             id: confirmed ? 'storage-collision-confirmed' : 'storage-collision-unconfirmed',
-            title: confirmed ? 'Stage2: On-chain state confirms storage collision risk' : 'Stage2: On-chain state does not confirm collision (heuristic)',
-            severity: confirmed ? 'critical' : 'low',
+            title: confirmed ? 'On-chain: storage collision indicators present (stage 2)' : 'On-chain: no collision indicators observed (stage 2)',
+            severity: confirmed ? 'high' : 'low',
             metadata: {
                 proxyAddress: ctx.proxy.address,
                 logicAddress: ctx.logic.address,

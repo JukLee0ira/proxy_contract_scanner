@@ -38,7 +38,7 @@ export function buildUpgradeAlertMessage(payload: UpgradeAlertPayload): string {
     if (payload.txHash && payload.txHash.length > 0) {
         lines.push(`Tx: ${payload.txHash}`);
     }
-    lines.push(`Detection: ${payload.detection}`);
+    lines.push(`Source: ${payload.detection}`);
     return lines.join('\n');
 }
 

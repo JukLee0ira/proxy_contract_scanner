@@ -1678,10 +1678,21 @@ function buildFindingsTelegramMessage(proxy: string, logic: string, mode: 'sourc
     lines.push(`Logic: ${logic}`);
     lines.push(`Mode: ${mode}`);
     lines.push(`Findings: ${findings.length}`);
+    function normalizeSeverityLabel(raw: string | undefined): string {
+        const v = String(raw || '').toLowerCase();
+        switch (v) {
+            case 'critical': return 'HIGH';
+            case 'high': return 'HIGH';
+            case 'medium': return 'MEDIUM';
+            case 'low': return 'LOW';
+            case 'info':
+            default: return 'INFO';
+        }
+    }
     const maxLines = 15; // avoid too long message
     for (let i = 0; i < Math.min(findings.length, maxLines); i++) {
         const f = findings[i] || {};
-        const sev = f.severity || 'info';
+        const sev = normalizeSeverityLabel(f.severity);
         const title = f.title || f.id || 'untitled';
         lines.push(`- [${sev}] ${title}`);
     }

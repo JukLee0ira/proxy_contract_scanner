@@ -50,14 +50,14 @@ export const UpgradeGovernancePairDetector: PairDetector = {
         if (unprotected) {
             findings.push({
                 id: 'upgrade-unprotected',
-                title: 'Proxy upgrade is callable by non-admin (unprotected upgrade path)',
+                title: 'Upgrade: callable by non-admin',
                 severity: 'high',
                 metadata: { proxy, logic, from: attacker, methodTried: unprotected.method }
             });
         } else {
             findings.push({
                 id: 'upgrade-protected',
-                title: 'Proxy upgrade entrypoints reverted for non-admin (likely protected)',
+                title: 'Upgrade: non-admin call reverted (likely protected)',
                 severity: 'info',
                 metadata: { proxy, logic, from: attacker, reason: lastReason }
             });
