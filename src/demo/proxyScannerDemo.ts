@@ -1338,14 +1338,9 @@ async function main() {
         // Start storage slot monitoring
         storageSlotMonitor.startMonitoring();
 
-        // If analyze mode is enabled, run pair analysis once at startup using latest DB record
+        // If analyze mode is enabled, do not run startup analysis; runtime events will trigger analysis
         if (analyzeEnabled) {
-            console.log("[analyze] listen-and-analyze mode enabled. Fetching latest pair from DB and running checks...");
-            try {
-                await analyzeLatestPairFromDB(selectedCheckKeys);
-            } catch (e: any) {
-                console.error(`[analyze] Failed to analyze latest pair: ${e?.message || String(e)}`);
-            }
+            console.log("[analyze] listen-and-analyze mode enabled.");
         } else {
             console.log("[analyze] listen-only mode (no startup analysis). Enable with --mode=listen-analyze or ANALYZE=1");
         }
