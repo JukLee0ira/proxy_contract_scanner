@@ -7,7 +7,10 @@ A comprehensive Ethereum proxy contract scanner and monitoring tool with Hardhat
 - **Real-time Proxy Detection**: Monitors blockchain for proxy contracts using bytecode analysis
 - **EIP-1967 Support**: Detects standard proxy patterns with logic and admin contracts
 - **Event Monitoring**: Tracks upgrade events for discovered proxy contracts
+- **Security Analysis**: Automated vulnerability detection with multiple analysis modes
+- **HTTP API**: RESTful API for querying scanner status and proxy contract data
 - **Database Integration**: Optional PostgreSQL support for persistent storage
+- **Telegram Alerts**: Real-time notifications for proxy discoveries and upgrades
 - **Hardhat Integration**: Smart contract testing and deployment capabilities
 - **Configurable**: Flexible configuration system for different networks and environments
 
@@ -79,16 +82,170 @@ CREATE TABLE proxy_contracts (
 );
 ```
 
-### 3. Run Demo
+### 3. Configure Telegram Alerts (Optional)
 
-#### Real-time Monitoring Mode
 ```bash
-npm start
-# or
-npx ts-node src/demo/proxyScannerDemo.ts
+# Telegram Bot Configuration (Optional)
+TG_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
 ```
 
-#### Other Available Commands
+### 4. Run Scanner
+
+#### Mode 1: Listen Only (Default Mode)
+```bash
+npx ts-node src/demo/proxyScannerDemo.ts
+```
+- **Behavior**: Pure monitoring mode. The tool starts and listens for new contracts and upgrade events on the blockchain. Only performs discovery and recording (e.g., saving to database), **without executing any security checks**.
+
+#### Mode 2: Listen & Analyze
+```bash
+npx ts-node src/demo/proxyScannerDemo.ts --mode=listen-analyze
+```
+- **Behavior**: Monitoring with analysis. Starts listeners and **automatically triggers all** available security checks when new events are discovered.
+- If source code is available (Slither or Explorer successful) → Uses source code context to run all pair detectors
+- If source code unavailable → Falls back to bytecode analysis (requires RPC access to bytecode)
+- Detector suite includes: `hello-pair`, `upgrade-governance`, `storage-collision`, `initializer_mistakes`
+
+#### Mode 3: Listen & Analyze with Specific Checks
+```bash
+npx ts-node src/demo/proxyScannerDemo.ts --mode=listen-analyze --checks=storage-collision,uninitialized-impl
+```
+- **Behavior**: Same as Mode 2 but only runs specified security checks
+
+#### List Available Security Checks
+```bash
+npx ts-node src/demo/proxyScannerDemo.ts --list-checks
+```
+**Example Output:**
+```
+Available Checks:
+- storage-collision:  Detects proxy/implementation storage slot collisions.
+- uninitialized-impl: Checks for uninitialized implementation contracts.
+- admin-privilege:    Analyzes admin access control vulnerabilities.
+```
+
+### 5. HTTP API Usage
+
+The scanner provides a RESTful API for querying status and proxy contract data:
+
+#### Get Scanner Status
+```bash
+GET /status
+```
+Returns overall scanner status for health checks and monitoring.
+
+**Example Response:**
+```json
+{
+  "db": { "available": true },
+  "listener": { "current": 12, "max": 50, "available": 38 },
+  "storageMonitor": { "monitoredCount": 3, "isRunning": true, "checkInterval": 30000 },
+  "queue": { "length": 5 },
+  "concurrency": { "activeBlockScans": 1, "pendingBlocks": 2 },
+  "rpc": "http://localhost:8547"
+}
+```
+
+#### Get Monitored Contracts
+```bash
+GET /monitored
+```
+Returns list of currently monitored proxy contract addresses.
+
+**Example Response:**
+```json
+{
+  "eventListener": ["0x1234...", "0x5678..."],
+  "storageMonitor": ["0xabcd...", "0xefgh..."]
+}
+```
+
+#### Get Proxy Contracts (Paginated)
+```bash
+GET /proxies?limit=50&offset=0
+```
+Returns paginated list of discovered proxy contracts from database.
+
+**Parameters:**
+- `limit` (optional): Default 50, max recommended 200
+- `offset` (optional): Default 0
+
+**Example Response:**
+```json
+[
+  {
+    "proxy_address": "0x1234...",
+    "logic_contract": "0x5678...",
+    "admin_contract": "0x9abc...",
+    "block_number": 12345678,
+    "detected_at": "2023-01-01T12:00:00Z",
+    "updated_at": "2023-01-01T12:00:00Z",
+    "contract_type": "eip1967"
+  }
+]
+```
+
+#### Get Specific Proxy Contract
+```bash
+GET /proxies/{address}
+```
+Returns information for a specific proxy contract.
+
+**Example Response:**
+```json
+{
+  "proxy_address": "0x1234...",
+  "logic_contract": "0x5678...",
+  "admin_contract": "0x9abc...",
+  "block_number": 12345678,
+  "detected_at": "2023-01-01T12:00:00Z",
+  "updated_at": "2023-01-01T12:00:00Z",
+  "contract_type": "eip1967"
+}
+```
+
+#### Get Proxy History
+```bash
+GET /history?address=0x1234...
+```
+Returns all version records for a specific proxy contract (ordered by detected_at descending).
+
+**Example Response:**
+```json
+[
+  {
+    "proxy_address": "0x1234...",
+    "logic_contract": "0x5678...",
+    "upgrade_tx_hash": "0xabcd...",
+    "block_number": 12345680,
+    "detected_at": "2023-01-02T12:00:00Z"
+  },
+  {
+    "proxy_address": "0x1234...",
+    "logic_contract": "0x1111...",
+    "upgrade_tx_hash": "",
+    "block_number": 12345678,
+    "detected_at": "2023-01-01T12:00:00Z"
+  }
+]
+```
+
+
+## Security Analysis
+
+The scanner includes multiple security detectors:
+
+- **Storage Collision**: Detects proxy/implementation storage slot conflicts
+- **Uninitialized Implementation**: Checks for uninitialized implementation contracts  
+- **Admin Privilege**: Analyzes admin access control vulnerabilities
+- **Upgrade Governance**: Tests upgrade function protection
+
+Analysis modes:
+- **Source Code Analysis**: When contract source is available via Slither or block explorers
+- **Bytecode Analysis**: Fallback mode using on-chain bytecode when source unavailable
+
+### 6. Other Available Commands
 ```bash
 # Build project
 npm run build
