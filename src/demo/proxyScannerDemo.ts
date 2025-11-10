@@ -79,6 +79,32 @@ let proxyEventListener: ProxyEventListener | null = null;
 // Global storage slot monitor instance for non-EIP1967 proxies
 let storageSlotMonitor: StorageSlotMonitor | null = null;
 
+// Pair detector registry and aliases
+const PAIR_DETECTOR_REGISTRY: Record<string, any> = {
+    'hello-pair': HelloPairDetector,
+    'upgrade-governance': UpgradeGovernancePairDetector,
+    'storage-collision': StorageCollisionPairDetector,
+    'initializer_mistakes': InitializerMistakesPairDetector,
+};
+const PAIR_DETECTOR_ALIASES: Record<string, string> = {
+    'hello': 'hello-pair',
+    'upgrade_governance': 'upgrade-governance',
+    'storage_collision': 'storage-collision',
+    'initializer-mistakes': 'initializer_mistakes',
+    'initializerMistakes': 'initializer_mistakes',
+    'uninitialized-impl': 'initializer_mistakes',
+    'uninitialized_impl': 'initializer_mistakes',
+    'uninitialized': 'initializer_mistakes',
+};
+function selectPairDetectors(keys?: string[]): any[] {
+    if (!keys || keys.length === 0) return Object.values(PAIR_DETECTOR_REGISTRY);
+    const resolved = keys
+        .map(k => (PAIR_DETECTOR_ALIASES[k] || k))
+        .map(k => PAIR_DETECTOR_REGISTRY[k])
+        .filter(Boolean);
+    return resolved.length ? resolved : Object.values(PAIR_DETECTOR_REGISTRY);
+}
+
 // Event listener management for proxy contracts
 class ProxyEventListener {
     private listeners: Map<string, any> = new Map(); // proxyAddress -> listener
@@ -1222,6 +1248,10 @@ async function main() {
         );
         const modeArg = kv['mode'] || (args.includes('--analyze') ? 'listen-analyze' : undefined) || process.env.MODE;
         const analyzeEnabled = (process.env.ANALYZE === '1') || (modeArg === 'analyze') || (modeArg === 'listen-analyze');
+        const checksArgRaw = kv['checks'] || process.env.CHECKS || kv['detectors'] || process.env.DETECTORS || '';
+        const selectedCheckKeys = checksArgRaw
+            ? checksArgRaw.split(',').map((s: string) => s.trim()).filter(Boolean)
+            : [];
 
         console.log("Initializing database...");
         console.log("Database config:", {
@@ -1263,7 +1293,7 @@ async function main() {
         if (analyzeEnabled) {
             console.log("[analyze] listen-and-analyze mode enabled. Fetching latest pair from DB and running checks...");
             try {
-                await analyzeLatestPairFromDB();
+                await analyzeLatestPairFromDB(selectedCheckKeys);
             } catch (e: any) {
                 console.error(`[analyze] Failed to analyze latest pair: ${e?.message || String(e)}`);
             }
@@ -1558,23 +1588,18 @@ async function buildPairContext(proxy: string, logic: string): Promise<{ ctx: an
     };
 }
 
-async function runAllPairDetectors(ctx: any): Promise<any[]> {
-    const detectors: any[] = [
-        HelloPairDetector,
-        UpgradeGovernancePairDetector,
-        StorageCollisionPairDetector,
-        InitializerMistakesPairDetector,
-    ];
+async function runSelectedPairDetectors(ctx: any, keys?: string[]): Promise<any[]> {
+    const detectors: any[] = selectPairDetectors(keys);
     console.log(`[analyze] Detectors selected: ${detectors.map(d => d.name || 'unknown').join(', ')}`);
     const findings = await runPairDetectors(ctx, detectors as any);
     return findings;
 }
 
-async function analyzeLatestPairFromDB(): Promise<void> {
+async function analyzeLatestPairFromDB(checkKeys?: string[]): Promise<void> {
     const latest = await fetchLatestPairFromDB();
     if (!latest) return;
     const built = await buildPairContext(latest.proxy, latest.logic);
     if (!built) return;
-    const findings = await runAllPairDetectors(built.ctx);
+    const findings = await runSelectedPairDetectors(built.ctx, checkKeys);
     console.log(JSON.stringify({ proxy: latest.proxy, logic: latest.logic, sourceMode: built.used, findings }, null, 2));
 }
