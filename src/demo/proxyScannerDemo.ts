@@ -453,6 +453,12 @@ class StorageSlotMonitor {
                     for (const address of addresses) {
                         const lower = address.toLowerCase();
                         if (this.isValidContractAddress(address) && !foundSet.has(lower)) {
+                            // Strong validation: ensure the candidate actually has deployed bytecode
+                            const hasCode = await this.hasContractCode(address);
+                            if (!hasCode) {
+                                console.log(`⛔  Skipping storage candidate without code (likely numeric noise) at slot ${slot} for ${proxyAddress}: ${address}`);
+                                continue;
+                            }
                             console.log(`✅ Found potential implementation at slot ${slot} for ${proxyAddress}: ${address}`);
                             foundAddresses.push(address);
                             foundSet.add(lower);
@@ -518,6 +524,19 @@ class StorageSlotMonitor {
         }
 
         return true;
+    }
+
+    /**
+     * Check if an address has deployed bytecode (strong validation to filter numeric noise)
+     */
+    private async hasContractCode(address: string): Promise<boolean> {
+        try {
+            const code = await this.provider.send('eth_getCode', [address, 'latest']);
+            return !!code && code !== '0x';
+        } catch (e) {
+            console.warn(`eth_getCode failed for ${address}:`, e instanceof Error ? e.message : String(e));
+            return false;
+        }
     }
 
     /**
