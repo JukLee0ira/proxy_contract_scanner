@@ -105,6 +105,10 @@ function selectPairDetectors(keys?: string[]): any[] {
     return resolved.length ? resolved : Object.values(PAIR_DETECTOR_REGISTRY);
 }
 
+// Global analyze mode flags for event-triggered analysis
+let analyzeModeEnabled: boolean = false;
+let selectedPairCheckKeys: string[] = [];
+
 // Event listener management for proxy contracts
 class ProxyEventListener {
     private listeners: Map<string, any> = new Map(); // proxyAddress -> listener
@@ -208,6 +212,16 @@ class ProxyEventListener {
                 }
             } catch (alertErr) {
                 console.warn(`Telegram alert error (event): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
+            }
+
+            // Trigger security analysis for this specific pair if analyze mode is enabled
+            if (analyzeModeEnabled) {
+                try {
+                    console.log(`[analyze] Triggering checks for upgraded pair proxy=${proxyAddress} logic=${newImplementation}`);
+                    await analyzePairAddresses(proxyAddress.toLowerCase(), newImplementation.toLowerCase(), selectedPairCheckKeys);
+                } catch (e: any) {
+                    console.error(`[analyze] Pair analysis failed for ${proxyAddress} -> ${newImplementation}: ${e?.message || String(e)}`);
+                }
             }
 
         } catch (error) {
@@ -619,6 +633,18 @@ class StorageSlotMonitor {
                 }
             } catch (alertErr) {
                 console.warn(`Telegram alert error (storage): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
+            }
+
+            // Trigger security analysis asynchronously if analyze mode is enabled
+            if (analyzeModeEnabled) {
+                try {
+                    console.log(`[analyze] Triggering checks (storage) for upgraded pair proxy=${proxyAddress} logic=${newImplementation}`);
+                    // Fire and forget; do not block the monitoring loop
+                    analyzePairAddresses(proxyAddress.toLowerCase(), newImplementation.toLowerCase(), selectedPairCheckKeys)
+                        .catch((e) => console.error(`[analyze] Background analysis failed for ${proxyAddress}:`, e instanceof Error ? e.message : String(e)));
+                } catch (e) {
+                    console.error(`[analyze] Failed to schedule analysis for ${proxyAddress}:`, e instanceof Error ? e.message : String(e));
+                }
             }
         } catch (error) {
             console.error(`Failed to save storage slot upgrade to database:`, error);
@@ -1261,7 +1287,8 @@ async function main() {
         const args: string[] = process.argv.slice(2).map((s: string) => s.trim()).filter(Boolean);
         const kv: Record<string, string> = Object.fromEntries(
             args.filter(a => a.includes('=')).map(a => {
-                const [k, ...rest] = a.split('=');
+                const [rawK, ...rest] = a.split('=');
+                const k = rawK.replace(/^-+/, ''); // strip leading dashes, e.g., --mode -> mode
                 return [k, rest.join('=')];
             })
         );
@@ -1271,6 +1298,9 @@ async function main() {
         const selectedCheckKeys = checksArgRaw
             ? checksArgRaw.split(',').map((s: string) => s.trim()).filter(Boolean)
             : [];
+        // set globals for event-triggered analysis
+        analyzeModeEnabled = !!analyzeEnabled;
+        selectedPairCheckKeys = selectedCheckKeys;
 
         console.log("Initializing database...");
         console.log("Database config:", {
@@ -1621,4 +1651,47 @@ async function analyzeLatestPairFromDB(checkKeys?: string[]): Promise<void> {
     if (!built) return;
     const findings = await runSelectedPairDetectors(built.ctx, checkKeys);
     console.log(JSON.stringify({ proxy: latest.proxy, logic: latest.logic, sourceMode: built.used, findings }, null, 2));
+}
+
+async function analyzePairAddresses(proxy: string, logic: string, checkKeys?: string[]): Promise<void> {
+    const built = await buildPairContext(proxy, logic);
+    if (!built) {
+        const msg = `[analyze] Skipped analysis for ${proxy} -> ${logic} (no sources/bytecode).`;
+        console.log(msg);
+        try {
+            if (isTelegramEnabled()) await sendTelegramAlert(msg);
+        } catch {}
+        return;
+    }
+    const findings = await runSelectedPairDetectors(built.ctx, checkKeys);
+    const payload = { proxy, logic, sourceMode: built.used, findings };
+    console.log(JSON.stringify(payload, null, 2));
+    try {
+        if (isTelegramEnabled()) {
+            const summary = buildFindingsTelegramMessage(proxy, logic, built.used, findings);
+            await sendTelegramAlert(summary);
+        }
+    } catch (e) {
+        console.warn(`Telegram alert (analysis) failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+}
+
+function buildFindingsTelegramMessage(proxy: string, logic: string, mode: 'sources' | 'bytecode', findings: any[]): string {
+    const lines: string[] = [];
+    lines.push('🔎 Pair Security Analysis Results');
+    lines.push(`Proxy: ${proxy}`);
+    lines.push(`Logic: ${logic}`);
+    lines.push(`Mode: ${mode}`);
+    lines.push(`Findings: ${findings.length}`);
+    const maxLines = 15; // avoid too long message
+    for (let i = 0; i < Math.min(findings.length, maxLines); i++) {
+        const f = findings[i] || {};
+        const sev = f.severity || 'info';
+        const title = f.title || f.id || 'untitled';
+        lines.push(`- [${sev}] ${title}`);
+    }
+    if (findings.length > maxLines) {
+        lines.push(`... and ${findings.length - maxLines} more`);
+    }
+    return lines.join('\n');
 }
