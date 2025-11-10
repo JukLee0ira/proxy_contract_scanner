@@ -95,6 +95,7 @@ const PAIR_DETECTOR_ALIASES: Record<string, string> = {
     'uninitialized-impl': 'initializer_mistakes',
     'uninitialized_impl': 'initializer_mistakes',
     'uninitialized': 'initializer_mistakes',
+    'admin-privilege': 'upgrade-governance',
 };
 function selectPairDetectors(keys?: string[]): any[] {
     if (!keys || keys.length === 0) return Object.values(PAIR_DETECTOR_REGISTRY);
@@ -1292,6 +1293,19 @@ async function main() {
                 return [k, rest.join('=')];
             })
         );
+        // Handle help: list checks and exit
+        const listChecksRequested = args.includes('--list-checks') || args.includes('-l') || kv['list-checks'] === '1';
+        if (listChecksRequested) {
+            // Keep output formatting consistent with request
+            const lines: string[] = [];
+            lines.push('Available Checks:');
+            lines.push('');
+            lines.push('- storage-collision:  Detects proxy/implementation storage slot collisions.');
+            lines.push('- uninitialized-impl: Checks for uninitialized implementation contracts.');
+            lines.push('- admin-privilege:    Analyzes admin access control vulnerabilities.');
+            console.log(lines.join('\n'));
+            process.exit(0);
+        }
         const modeArg = kv['mode'] || (args.includes('--analyze') ? 'listen-analyze' : undefined) || process.env.MODE;
         const analyzeEnabled = (process.env.ANALYZE === '1') || (modeArg === 'analyze') || (modeArg === 'listen-analyze');
         const checksArgRaw = kv['checks'] || process.env.CHECKS || kv['detectors'] || process.env.DETECTORS || '';
