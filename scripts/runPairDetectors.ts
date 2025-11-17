@@ -6,6 +6,7 @@ import { getVerifiedSource } from '../src/clients/etherscan';
 import { StorageCollisionPairDetector } from '../src/detectors/pair/storageCollision';
 import { InitializerMistakesPairDetector } from '../src/detectors/pair/initializerMistakes';
 import { MixingPatternsPairDetector } from '../src/detectors/pair/mixingPatterns';
+import { LibraryMisusePairDetector } from '../src/detectors/pair/libraryMisuse';
 import { ethers } from 'ethers';
 
 function pickAddress(args: string[], idx: number): string | undefined {
@@ -109,6 +110,7 @@ async function main() {
         'storage-collision': StorageCollisionPairDetector,
         'initializer_mistakes': InitializerMistakesPairDetector,
         'mixing_patterns': MixingPatternsPairDetector,
+        'library_misuse': LibraryMisusePairDetector,
     };
     const selected = detKeys.length ? detKeys.map(k => registry[k]).filter(Boolean) : Object.values(registry);
 
