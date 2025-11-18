@@ -161,10 +161,12 @@ async function analyzePair(proxy: string, logic: string): Promise<RiskRow | null
         'storage-collision': StorageCollisionPairDetector,
         'initializer_mistakes': InitializerMistakesPairDetector,
         'mixing_patterns': MixingPatternsPairDetector,
+        // library-misuse: 单一入口；内部优先源码分析，缺源码时自动降级为 NO_SOURCE/bytecode 分析
         'library_misuse': LibraryMisusePairDetector,
         'library-misuse': LibraryMisusePairDetector,
     };
-    const detectors = Object.values(registry);
+    // 去重，避免相同 detector 通过多个 key 出现多次
+    const detectors = Array.from(new Set(Object.values(registry)));
     console.log(`[batch] Detectors selected: ${detectors.map((d: any) => d.name || 'unknown').join(', ')}`);
 
     const findings = await runPairDetectors(built.ctx, detectors as any);

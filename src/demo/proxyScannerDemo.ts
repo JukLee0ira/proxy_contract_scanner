@@ -107,13 +107,26 @@ const PAIR_DETECTOR_ALIASES: Record<string, string> = {
     // library-misuse aliases
     'libraryMisuse': 'library_misuse',
 };
+
 function selectPairDetectors(keys?: string[]): any[] {
-    if (!keys || keys.length === 0) return Object.values(PAIR_DETECTOR_REGISTRY);
-    const resolved = keys
-        .map(k => (PAIR_DETECTOR_ALIASES[k] || k))
-        .map(k => PAIR_DETECTOR_REGISTRY[k])
-        .filter(Boolean);
-    return resolved.length ? resolved : Object.values(PAIR_DETECTOR_REGISTRY);
+    const rawList: any[] =
+        !keys || keys.length === 0
+            ? Object.values(PAIR_DETECTOR_REGISTRY)
+            : keys
+                  .map(k => (PAIR_DETECTOR_ALIASES[k] || k))
+                  .map(k => PAIR_DETECTOR_REGISTRY[k])
+                  .filter(Boolean);
+
+    // 去重：避免同一个 detector 通过多个 key/alias 被添加多次
+    const unique: any[] = [];
+    const seen = new Set<any>();
+    for (const det of rawList) {
+        if (!seen.has(det)) {
+            seen.add(det);
+            unique.push(det);
+        }
+    }
+    return unique.length ? unique : Object.values(PAIR_DETECTOR_REGISTRY);
 }
 
 // Global analyze mode flags for event-triggered analysis
