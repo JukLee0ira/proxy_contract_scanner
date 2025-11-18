@@ -745,8 +745,8 @@ async function checkBytecodeForOpcode(address: string, opcode: number): Promise<
 
 // Database functions
 async function createTablesIfNotExist() {
-    if (!isDatabaseAvailable) {
-        console.log("Database not available, skipping table creation");
+    if (!pool) {
+        console.log("Database pool not initialized, skipping table creation");
         return;
     }
 
@@ -780,7 +780,7 @@ async function createTablesIfNotExist() {
 }
 
 async function saveOrUpdateProxyContract(proxyAddress: string, logicContract: string, adminContract: string = '', blockNumber: number, upgradeTxHash: string = '') {
-    if (!isDatabaseAvailable) {
+    if (!isDatabaseAvailable || !pool) {
         console.log(`Database not available, skipping save for proxy contract: ${proxyAddress}`);
         return;
     }

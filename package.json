@@ -14,6 +14,7 @@
     "start": "ts-node src/demo/proxyScannerDemo.ts",
     "analyze:one": "ts-node scripts/analyzeOne.ts",
     "scan:initial": "ts-node scripts/initialScan.ts",
+    "scan:batch": "ts-node scripts/scanBatch.ts",
     "print:source": "ts-node scripts/printSource.ts",
     "detect:hello": "ts-node scripts/runDetectors.ts",
     "detect:selfdestruct": "ts-node scripts/runDetectors.ts",
