@@ -7,7 +7,6 @@ import { StorageCollisionPairDetector } from '../src/detectors/pair/storageColli
 import { InitializerMistakesPairDetector } from '../src/detectors/pair/initializerMistakes';
 import { MixingPatternsPairDetector } from '../src/detectors/pair/mixingPatterns';
 import { LibraryMisusePairDetector } from '../src/detectors/pair/libraryMisuse';
-import { LibraryMisuseNoSourcePairDetector } from '../src/detectors/pair/libraryMisuseNoSource';
 import { ethers } from 'ethers';
 
 function pickAddress(args: string[], idx: number): string | undefined {
@@ -111,8 +110,9 @@ async function main() {
         'storage-collision': StorageCollisionPairDetector,
         'initializer_mistakes': InitializerMistakesPairDetector,
         'mixing_patterns': MixingPatternsPairDetector,
+        // library-misuse: 单一入口；内部优先源码分析，缺源码时自动降级为 NO_SOURCE/bytecode 分析
         'library_misuse': LibraryMisusePairDetector,
-        'library-misuse': LibraryMisuseNoSourcePairDetector,
+        'library-misuse': LibraryMisusePairDetector,
     };
     const selected = detKeys.length ? detKeys.map(k => registry[k]).filter(Boolean) : Object.values(registry);
 

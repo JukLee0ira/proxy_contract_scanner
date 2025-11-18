@@ -1,5 +1,6 @@
 import { PairDetector, PairDetectorContext, PairDetectorFinding } from './index';
 import { ethers } from 'ethers';
+import { LibraryMisuseNoSourcePairDetector } from './libraryMisuseNoSource';
 
 function isZeroAddress(addr?: string | null): boolean {
     if (!addr) return true;
@@ -140,6 +141,19 @@ function analyzeSource(source?: string): SourceAnalysis {
 export const LibraryMisusePairDetector: PairDetector = {
     name: 'library_misuse',
     async run(ctx: PairDetectorContext): Promise<PairDetectorFinding[]> {
+        // 优先使用源码模式；如果缺少源码，则降级为 NO_SOURCE/bytecode 检测
+        const proxyHasSrc =
+            !!ctx.proxy.sources &&
+            Object.values(ctx.proxy.sources).some((c) => (c || '').trim().length > 0);
+        const logicHasSrc =
+            !!ctx.logic.sources &&
+            Object.values(ctx.logic.sources).some((c) => (c || '').trim().length > 0);
+
+        if (!proxyHasSrc || !logicHasSrc) {
+            // 源码缺失时，直接委托给 NO_SOURCE 版 detector
+            return await LibraryMisuseNoSourcePairDetector.run(ctx);
+        }
+
         const findings: PairDetectorFinding[] = [];
 
         const rpcUrl = process.env.RPC_URL || process.env.ETH_RPC_URL || 'http://localhost:8547';

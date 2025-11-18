@@ -9,6 +9,8 @@ import { HelloPairDetector } from "../detectors/pair/helloPair";
 import { UpgradeGovernancePairDetector } from "../detectors/pair/upgradeGovernance";
 import { StorageCollisionPairDetector } from "../detectors/pair/storageCollision";
 import { InitializerMistakesPairDetector } from "../detectors/pair/initializerMistakes";
+import { MixingPatternsPairDetector } from "../detectors/pair/mixingPatterns";
+import { LibraryMisusePairDetector } from "../detectors/pair/libraryMisuse";
 
 // TypeScript type declarations for CommonJS imports
 type EthersType = {
@@ -85,6 +87,10 @@ const PAIR_DETECTOR_REGISTRY: Record<string, any> = {
     'upgrade-governance': UpgradeGovernancePairDetector,
     'storage-collision': StorageCollisionPairDetector,
     'initializer_mistakes': InitializerMistakesPairDetector,
+    'mixing_patterns': MixingPatternsPairDetector,
+    // library-misuse: 单一入口；内部优先源码分析，缺源码时自动降级为 NO_SOURCE/bytecode 分析
+    'library_misuse': LibraryMisusePairDetector,
+    'library-misuse': LibraryMisusePairDetector,
 };
 const PAIR_DETECTOR_ALIASES: Record<string, string> = {
     'hello': 'hello-pair',
@@ -96,6 +102,10 @@ const PAIR_DETECTOR_ALIASES: Record<string, string> = {
     'uninitialized_impl': 'initializer_mistakes',
     'uninitialized': 'initializer_mistakes',
     'admin-privilege': 'upgrade-governance',
+    'mixing-patterns': 'mixing_patterns',
+    'mixingPatterns': 'mixing_patterns',
+    // library-misuse aliases
+    'libraryMisuse': 'library_misuse',
 };
 function selectPairDetectors(keys?: string[]): any[] {
     if (!keys || keys.length === 0) return Object.values(PAIR_DETECTOR_REGISTRY);
@@ -1339,9 +1349,11 @@ async function main() {
             const lines: string[] = [];
             lines.push('Available Checks:');
             lines.push('');
-            lines.push('- storage-collision:  Detects proxy/implementation storage slot collisions.');
-            lines.push('- uninitialized-impl: Checks for uninitialized implementation contracts.');
-            lines.push('- admin-privilege:    Analyzes admin access control vulnerabilities.');
+            lines.push('- storage-collision:      Detects proxy/implementation storage slot collisions.');
+            lines.push('- uninitialized-impl:     Checks for uninitialized implementation contracts.');
+            lines.push('- admin-privilege:        Analyzes admin access control vulnerabilities.');
+            lines.push('- mixing-patterns:        Detects EIP-1967 beacon-style initializer mixing patterns.');
+            lines.push('- library-misuse:         Detects library misuse patterns.');
             console.log(lines.join('\n'));
             process.exit(0);
         }
