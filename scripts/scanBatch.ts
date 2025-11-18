@@ -236,6 +236,7 @@ async function main() {
     {
         const client = await pool.connect();
         try {
+            // 如果表不存在则创建（新库会直接包含所有列）
             await client.query(`
                 CREATE TABLE IF NOT EXISTS proxy_scan_results (
                     address VARCHAR(42) PRIMARY KEY,
@@ -247,7 +248,17 @@ async function main() {
                     raw_report JSONB
                 )
             `);
-            console.log('[batch] ✅ 确认结果表 proxy_scan_results 已存在/创建完成');
+            // 兼容老库：补上以前没有的列（如 mixing_patterns_risk / library_misuse_risk）
+            await client.query(`
+                ALTER TABLE proxy_scan_results
+                    ADD COLUMN IF NOT EXISTS upgrade_governance_risk VARCHAR(10) DEFAULT 'NONE',
+                    ADD COLUMN IF NOT EXISTS storage_collision_risk VARCHAR(10) DEFAULT 'NONE',
+                    ADD COLUMN IF NOT EXISTS initializer_exposure_risk VARCHAR(10) DEFAULT 'NONE',
+                    ADD COLUMN IF NOT EXISTS mixing_patterns_risk VARCHAR(10) DEFAULT 'NONE',
+                    ADD COLUMN IF NOT EXISTS library_misuse_risk VARCHAR(10) DEFAULT 'NONE',
+                    ADD COLUMN IF NOT EXISTS raw_report JSONB;
+            `);
+            console.log('[batch] ✅ 确认结果表 proxy_scan_results 已存在/列结构已对齐');
         } finally {
             client.release();
         }
