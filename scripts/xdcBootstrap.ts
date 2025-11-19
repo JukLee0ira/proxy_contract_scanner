@@ -18,69 +18,70 @@ async function main() {
     const chainId = process.env.XDC_CHAIN_ID ? parseInt(process.env.XDC_CHAIN_ID, 10) : undefined;
 
     if (!metaDbUrl) {
-        console.error('[xdcBootstrap] ❌ 环境变量 XDC_META_DB_URL 未设置，无法连接 XDC 元数据表。');
-        console.error('[xdcBootstrap] 示例：');
+        console.error('[xdcBootstrap] ❌ Environment variable XDC_META_DB_URL is not set, cannot connect to XDC metadata database.');
+        console.error('[xdcBootstrap] Example:');
         console.error('  XDC_META_DB_URL=postgres://user:pass@host:5432/xdc_transactions \\');
         console.error('    SCANNER_API_URL=http://localhost:3000 \\');
         console.error('    npx ts-node scripts/xdcBootstrap.ts --dry-run');
         process.exit(2);
     }
 
-    console.log('[xdcBootstrap] ▶️ 启动 XDC 元数据批量引导脚本（demo 配置检查阶段）');
+    console.log('[xdcBootstrap] ▶️ Starting XDC metadata bootstrap script (demo config check stage)');
     console.log(`[xdcBootstrap] - XDC_META_DB_URL: ${metaDbUrl}`);
     console.log(`[xdcBootstrap] - SCANNER_API_URL: ${apiUrl}`);
-    console.log(`[xdcBootstrap] - XDC_CHAIN_ID : ${chainId ?? '(未限定，后续将全表或按条件扫描)'}`);
+    console.log(`[xdcBootstrap] - XDC_CHAIN_ID : ${chainId ?? '(not limited, will scan whole table or by condition later)'}`);
 
     // 解析命令行参数（例如 --dry-run）
     const args = process.argv.slice(2).map(s => s.trim()).filter(Boolean);
     const isDryRun = args.includes('--dry-run') || args.includes('-n');
 
-    // 1) 尝试连一次 XDC 元数据库，只做简单查询（不取真实数据，防止误操作）
+    // 1) Try connecting to the XDC metadata database once, perform a simple query only (no real data fetch to avoid mis-operations)
     const metaPool = new Pool({ connectionString: metaDbUrl });
     try {
-        console.log('[xdcBootstrap] 🧪 正在测试连接 XDC 元数据数据库...');
+        console.log('[xdcBootstrap] 🧪 Testing connection to XDC metadata database...');
         const client = await metaPool.connect();
         try {
-            // 注意：这里使用的是你已有的合约目录表 contracts
+            // NOTE: Using your existing contracts directory table `contracts`
             const testSql = 'SELECT COUNT(1) AS cnt FROM contracts;';
             const res = await client.query(testSql);
             const cnt = (res.rows[0] && Number(res.rows[0].cnt)) || 0;
-            console.log(`[xdcBootstrap] ✅ 连接成功，表 contracts 当前行数约为: ${cnt}`);
+            console.log(`[xdcBootstrap] ✅ Connection successful, current row count of table contracts: ${cnt}`);
         } finally {
             client.release();
         }
     } catch (e) {
-        console.error('[xdcBootstrap] ❌ 连接或测试查询 XDC 元数据数据库失败：', e instanceof Error ? e.message : String(e));
+        console.error('[xdcBootstrap] ❌ Failed to connect to or query XDC metadata database:', e instanceof Error ? e.message : String(e));
         await metaPool.end().catch(() => undefined);
         process.exit(1);
     }
 
-    // 2) 测试 HTTP API /status 是否可用（验证 scanner + API 是否已启动）
+    // 2) Test whether HTTP API /status is available (verify scanner + API are running)
     try {
-        console.log('[xdcBootstrap] 🧪 正在测试连接 Scanner HTTP API /status ...');
+        console.log('[xdcBootstrap] 🧪 Testing Scanner HTTP API /status ...');
         const resp = await axios.get(`${apiUrl}/status`, { timeout: 5000 });
-        console.log('[xdcBootstrap] ✅ /status 返回结果简要：', {
+        console.log('[xdcBootstrap] ✅ /status response summary:', {
             db: resp.data?.db,
             listener: resp.data?.listener,
             storageMonitor: resp.data?.storageMonitor,
         });
     } catch (e) {
-        console.error('[xdcBootstrap] ⚠️ 无法访问 Scanner HTTP API /status，请确认 scanner 是否已运行：', e instanceof Error ? e.message : String(e));
-        console.error('[xdcBootstrap]  示例启动命令（供参考）：');
+        console.error('[xdcBootstrap] ⚠️ Cannot access Scanner HTTP API /status, please confirm scanner is running:', e instanceof Error ? e.message : String(e));
+        console.error('[xdcBootstrap]  Example start command (for reference):');
         console.error('    MODE=listen-analyze RPC_URL=... DB_HOST=... DB_NAME=... \\');
         console.error('      npx ts-node src/index.ts');
     }
 
     if (isDryRun) {
-        console.log('[xdcBootstrap] 💡 当前为 --dry-run 模式，只做配置与连通性检查，不会真正拉取地址或调用 /monitor。');
+        console.log('[xdcBootstrap] 💡 Running in --dry-run mode, only checking configuration and connectivity, will not pull addresses or call /monitor.');
     } else {
-        // 3) demo：从 contracts 表中拉取一小批地址，打印出来，并对前若干条调用 /monitor 走入现有管线
+        // 3) Demo: fetch a small batch of addresses from table `contracts`, print them,
+        //    and call /monitor for the first few to go through the existing pipeline
         try {
-            console.log('[xdcBootstrap] 🧪 拉取示例合约地址（来自 contracts，LIMIT 10）...');
+            console.log('[xdcBootstrap] 🧪 Fetching sample contract addresses (from contracts, LIMIT 10)...');
             const client = await metaPool.connect();
             try {
-                // 注意：contracts 表中的部分列是驼峰形式（chainId / isProxy / similarMatch / lastProxyCheck / lastSeenAt），
-                // 在 PostgreSQL 中需要使用双引号精确引用。
+                // NOTE: Some columns in table `contracts` use camelCase (chainId / isProxy / similarMatch / lastProxyCheck / lastSeenAt),
+                //       you must use double quotes to reference them precisely in PostgreSQL.
                 const sampleSql = `
                     SELECT
                         address,
@@ -97,9 +98,9 @@ async function main() {
                 `;
                 const res = await client.query(sampleSql);
                 if (!res.rows.length) {
-                    console.log('[xdcBootstrap] ⚠️ contracts 表中没有任何记录（或查询结果为空）。');
+                    console.log('[xdcBootstrap] ⚠️ No records in table contracts (or query returned empty).');
                 } else {
-                    console.log('[xdcBootstrap] ✅ 示例地址列表（最多 10 条）：');
+                    console.log('[xdcBootstrap] ✅ Sample address list (up to 10 rows):');
                     for (const row of res.rows) {
                         console.log(
                             `  - address=${row.address} chainId=${row.chainId} ` +
@@ -109,14 +110,14 @@ async function main() {
                         );
                     }
 
-                    // 只对“有代理信号”的地址调用 /monitor，避免把大量明显非代理的地址挂成监控
+                    // Only call /monitor for addresses with proxy signal to avoid monitoring lots of obvious non-proxy addresses
                     const candidates = res.rows.filter((row: any) => row.isProxy === true);
                     const maxMonitor = 5;
                     if (!candidates.length) {
                         console.log('[xdcBootstrap] ⚠️ 本批示例地址中没有 isProxy=true 的记录，暂不调用 /monitor。');
                     } else {
                         const toUse = candidates.slice(0, maxMonitor);
-                        console.log(`[xdcBootstrap] 🚀 准备通过 /monitor 注入 ${toUse.length} 个 isProxy=true 的地址到 scanner 管线...`);
+                        console.log(`[xdcBootstrap] 🚀 Preparing to inject ${toUse.length} addresses with isProxy=true into scanner pipeline via /monitor...`);
                         for (const row of toUse) {
                             const addr = String(row.address).trim();
                             if (!addr) continue;
@@ -127,10 +128,10 @@ async function main() {
                                     { address: addr },
                                     { timeout: 10000 }
                                 );
-                                console.log('[xdcBootstrap] ✅ /monitor 返回：', resp.data);
+                                console.log('[xdcBootstrap] ✅ /monitor response:', resp.data);
                             } catch (e) {
                                 console.error(
-                                    `[xdcBootstrap] ❌ /monitor 失败 address=${addr}:`,
+                                    `[xdcBootstrap] ❌ /monitor failed for address=${addr}:`,
                                     e instanceof Error ? e.message : String(e)
                                 );
                             }
@@ -142,19 +143,19 @@ async function main() {
             }
         } catch (e) {
             console.error(
-                '[xdcBootstrap] ❌ 从 contracts 拉取示例地址失败：',
+                '[xdcBootstrap] ❌ Failed to fetch sample addresses from contracts:',
                 e instanceof Error ? e.message : String(e)
             );
         }
 
-        console.log('[xdcBootstrap] ℹ️ 当前版本在非 --dry-run 模式下会：1）拉取一批示例地址并打印；2）对前若干个地址调用 /monitor 送入现有管线。');
+        console.log('[xdcBootstrap] ℹ️ In non --dry-run mode, this version will: 1) fetch and print a sample batch of addresses; 2) call /monitor for the first few addresses to send into the existing pipeline.');
     }
 
     await metaPool.end().catch(() => undefined);
 }
 
 main().catch((e) => {
-    console.error('[xdcBootstrap] 运行出错：', e instanceof Error ? e.message : String(e));
+    console.error('[xdcBootstrap] Unexpected error while running xdcBootstrap:', e instanceof Error ? e.message : String(e));
     process.exit(1);
 });
 
