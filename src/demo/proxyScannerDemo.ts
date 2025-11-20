@@ -5,7 +5,6 @@ import { isTelegramEnabled, buildUpgradeAlertMessage, sendTelegramAlert } from "
 import { analyzeContract } from "../services/analyzer";
 import { getVerifiedSource } from "../clients/etherscan";
 import { runPairDetectors } from "../detectors/pair";
-import { HelloPairDetector } from "../detectors/pair/helloPair";
 import { UpgradeGovernancePairDetector } from "../detectors/pair/upgradeGovernance";
 import { StorageCollisionPairDetector } from "../detectors/pair/storageCollision";
 import { InitializerMistakesPairDetector } from "../detectors/pair/initializerMistakes";
@@ -83,7 +82,6 @@ let storageSlotMonitor: StorageSlotMonitor | null = null;
 
 // Pair detector registry and aliases
 const PAIR_DETECTOR_REGISTRY: Record<string, any> = {
-    'hello-pair': HelloPairDetector,
     'upgrade-governance': UpgradeGovernancePairDetector,
     'storage-collision': StorageCollisionPairDetector,
     'initializer_mistakes': InitializerMistakesPairDetector,
@@ -93,7 +91,6 @@ const PAIR_DETECTOR_REGISTRY: Record<string, any> = {
     'library-misuse': LibraryMisusePairDetector,
 };
 const PAIR_DETECTOR_ALIASES: Record<string, string> = {
-    'hello': 'hello-pair',
     'upgrade_governance': 'upgrade-governance',
     'storage_collision': 'storage-collision',
     'initializer-mistakes': 'initializer_mistakes',

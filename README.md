@@ -105,7 +105,7 @@ npx ts-node src/demo/proxyScannerDemo.ts --mode=listen-analyze
 - **Behavior**: Monitoring with analysis. Starts listeners and **automatically triggers all** available security checks when new events are discovered.
 - If source code is available (Slither or Explorer successful) → Uses source code context to run all pair detectors
 - If source code unavailable → Falls back to bytecode analysis (requires RPC access to bytecode)
-- Detector suite includes: `hello-pair`, `upgrade-governance`, `storage-collision`, `initializer_mistakes`, `mixing_patterns`
+- Detector suite includes: `upgrade-governance`, `storage-collision`, `initializer_mistakes`, `mixing_patterns`
 
 #### Mode 3: Listen & Analyze with Specific Checks
 ```bash

@@ -1,6 +1,5 @@
 import { analyzeContract } from '../src/services/analyzer';
 import { runPairDetectors } from '../src/detectors/pair';
-import { HelloPairDetector } from '../src/detectors/pair/helloPair';
 import { UpgradeGovernancePairDetector } from '../src/detectors/pair/upgradeGovernance';
 import { getVerifiedSource } from '../src/clients/etherscan';
 import { StorageCollisionPairDetector } from '../src/detectors/pair/storageCollision';
@@ -105,7 +104,6 @@ async function main() {
     const kvDet = kv['detectors'] || process.env.DETECTORS || '';
     const detKeys = kvDet ? kvDet.split(',').map(s => s.trim()).filter(Boolean) : [];
     const registry: Record<string, any> = {
-        'hello-pair': HelloPairDetector,
         'upgrade-governance': UpgradeGovernancePairDetector,
         'storage-collision': StorageCollisionPairDetector,
         'initializer_mistakes': InitializerMistakesPairDetector,

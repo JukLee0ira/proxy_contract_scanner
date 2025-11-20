@@ -2,7 +2,6 @@ import { Pool } from 'pg';
 import { ethers } from 'ethers';
 import { analyzeContract } from '../src/services/analyzer';
 import { runPairDetectors } from '../src/detectors/pair';
-import { HelloPairDetector } from '../src/detectors/pair/helloPair';
 import { UpgradeGovernancePairDetector } from '../src/detectors/pair/upgradeGovernance';
 import { StorageCollisionPairDetector } from '../src/detectors/pair/storageCollision';
 import { InitializerMistakesPairDetector } from '../src/detectors/pair/initializerMistakes';
@@ -156,7 +155,6 @@ async function analyzePair(proxy: string, logic: string): Promise<RiskRow | null
     }
 
     const registry: Record<string, any> = {
-        'hello-pair': HelloPairDetector,
         'upgrade-governance': UpgradeGovernancePairDetector,
         'storage-collision': StorageCollisionPairDetector,
         'initializer_mistakes': InitializerMistakesPairDetector,
