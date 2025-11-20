@@ -225,12 +225,26 @@ async function main() {
         process.exit(2);
     }
 
-    const batchSize = parseInt(process.env.BATCH_SIZE || '20', 10);
+    // 支持通过环境变量开启“全表扫描”模式：
+    // - SCAN_ALL=true / 1
+    // - 或 ALL=true / 1
+    // 另外也兼容 BATCH_SIZE=all 这种写法。
+    const rawBatchSizeEnv = process.env.BATCH_SIZE || '';
+    const scanAll =
+        ((process.env.SCAN_ALL || process.env.ALL || '').toLowerCase() === 'true') ||
+        ((process.env.SCAN_ALL || process.env.ALL || '') === '1') ||
+        rawBatchSizeEnv.toLowerCase() === 'all';
+
+    const batchSize = scanAll ? undefined : parseInt(rawBatchSizeEnv || '20', 10);
 
     console.log('[batch] ▶️ Starting batch scan (only writing to results table, no listeners, no per-item TG).');
     console.log(`[batch] - DB_URL  : ${metaDbUrl}`);
     console.log(`[batch] - RPC_URL : ${process.env.RPC_URL || process.env.ETH_RPC_URL || 'http://localhost:8547'}`);
-    console.log(`[batch] - BATCH_SIZE: ${batchSize}`);
+    if (scanAll) {
+        console.log('[batch] - MODE    : ALL (scan all eligible rows in contracts; ignoring BATCH_SIZE)');
+    } else {
+        console.log(`[batch] - BATCH_SIZE: ${batchSize}`);
+    }
 
     const pool = new Pool({ connectionString: metaDbUrl });
 
@@ -266,10 +280,10 @@ async function main() {
         }
     }
 
-    // 2) Read a batch of records from `contracts` where isProxy=true and implementation is non-empty
+    // 2) Read records from `contracts` where isProxy=true and implementation is non-empty
     let rows: any[] = [];
     try {
-        const sql = `
+        const baseSql = `
             SELECT
                 address,
                 implementation
@@ -278,9 +292,14 @@ async function main() {
               AND implementation IS NOT NULL
               AND length(implementation) = 42
             ORDER BY "lastSeenAt" DESC NULLS LAST
-            LIMIT $1;
         `;
-        const res = await pool.query(sql, [batchSize]);
+
+        const sql = scanAll ? baseSql : `${baseSql}
+            LIMIT $1`;
+
+        const params = scanAll ? [] : [batchSize];
+
+        const res = await pool.query(sql, params);
         rows = res.rows;
         console.log(`[batch] ✅ Selected ${rows.length} addresses from contracts where isProxy=true and implementation is non-empty.`);
         if (!rows.length) {
