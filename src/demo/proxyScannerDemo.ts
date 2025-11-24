@@ -1736,9 +1736,34 @@ async function analyzePairAddresses(proxy: string, logic: string, checkKeys?: st
     const findings = await runSelectedPairDetectors(built.ctx, checkKeys);
     const payload = { proxy, logic, sourceMode: built.used, findings };
     console.log(JSON.stringify(payload, null, 2));
+
+    // 将本次实时分析结果导出到在线表格（与批处理使用的 sheet 区分开）
+    try {
+        const mod = await import('../report/googleSheet');
+        if ((mod as any).appendRealtimeAnalysisToSheet) {
+            await (mod as any).appendRealtimeAnalysisToSheet({
+                proxy,
+                logic,
+                sourceMode: built.used,
+                findings,
+            });
+        }
+    } catch (e: any) {
+        console.warn('[analyze] Failed to export realtime analysis to spreadsheet:', e?.message || String(e));
+    }
+
     try {
         if (isTelegramEnabled()) {
-            const summary = buildFindingsTelegramMessage(proxy, logic, built.used, findings);
+            let summary = buildFindingsTelegramMessage(proxy, logic, built.used, findings);
+
+            // 在实时分析的 TG 报告中附上 Google Sheet 链接
+            const sheetId = process.env.GOOGLE_SHEETS_ID || process.env.REPORT_SHEET_ID;
+            const sheetUrlFromEnv = process.env.GOOGLE_SHEETS_URL;
+            const sheetUrl = sheetUrlFromEnv || (sheetId ? `https://docs.google.com/spreadsheets/d/${sheetId}/edit` : undefined);
+            if (sheetUrl) {
+                summary += `\n\nReported to Google Sheet: ${sheetUrl}`;
+            }
+
             await sendTelegramAlert(summary);
         }
     } catch (e) {

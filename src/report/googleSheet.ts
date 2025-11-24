@@ -21,6 +21,13 @@ export interface BatchVulnSummary {
     perAddress: AddressVulnRow[];
 }
 
+export interface RealtimeAnalysisPayload {
+    proxy: string;
+    logic: string;
+    sourceMode: 'sources' | 'bytecode';
+    findings: any[];
+}
+
 /**
  * 将本次批处理扫描的统计结果追加写入在线表格（如 Google Sheets）。
  *
@@ -220,6 +227,249 @@ export async function appendBatchReportToSheet(summary: BatchVulnSummary): Promi
     console.log('[report] Spreadsheet export completed.', {
         summaryRows: summaryValues.length,
         detailRows: detailRows.length,
+    });
+}
+
+/**
+ * 将实时监听/分析模式下的单次 pair 分析结果写入在线表格（独立于批处理使用的 sheet）。
+ *
+ * 使用的 sheet 名称：
+ * - RT_Summary: 每次分析一行汇总（proxy, logic, source_mode + 各严重度计数）
+ * - RT_Vulnerabilities: 每条 finding 一行明细
+ */
+export async function appendRealtimeAnalysisToSheet(payload: RealtimeAnalysisPayload): Promise<void> {
+    const spreadsheetId = process.env.GOOGLE_SHEETS_ID || process.env.REPORT_SHEET_ID;
+    const keyFilePath =
+        process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE ||
+        process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+    let clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+    let privateKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+
+    if (keyFilePath) {
+        try {
+            const raw = fs.readFileSync(keyFilePath, 'utf8');
+            const parsed = JSON.parse(raw);
+            if (parsed.client_email) clientEmail = String(parsed.client_email);
+            if (parsed.private_key) privateKey = String(parsed.private_key);
+        } catch (e: any) {
+            // eslint-disable-next-line no-console
+            console.warn('[report] (rt) Failed to read service account key file:', e?.message || String(e));
+        }
+    }
+
+    if (!spreadsheetId || !clientEmail || !privateKey) {
+        // eslint-disable-next-line no-console
+        console.log('[report] (rt) Spreadsheet export disabled (missing spreadsheet id or service account credentials).');
+        return;
+    }
+
+    let google: any;
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const mod = require('googleapis');
+        google = mod.google;
+    } catch (e: any) {
+        // eslint-disable-next-line no-console
+        console.warn('[report] (rt) googleapis package not installed. Run `npm install googleapis` to enable spreadsheet export.');
+        return;
+    }
+
+    const normalizedKey = privateKey.replace(/\\n/g, '\n');
+    const auth = new google.auth.JWT({
+        email: clientEmail,
+        key: normalizedKey,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    try {
+        await auth.authorize();
+    } catch (e: any) {
+        // eslint-disable-next-line no-console
+        console.warn('[report] (rt) Failed to authorize Google Sheets client:', e?.message || String(e));
+        return;
+    }
+
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    async function ensureSheetExists(title: string): Promise<void> {
+        const meta = await sheets.spreadsheets.get({
+            spreadsheetId,
+            fields: 'sheets.properties.title',
+        });
+        const existing =
+            (meta.data.sheets || []).some(
+                (s: any) => s.properties && s.properties.title === title,
+            );
+        if (!existing) {
+            await sheets.spreadsheets.batchUpdate({
+                spreadsheetId,
+                requestBody: {
+                    requests: [
+                        {
+                            addSheet: {
+                                properties: {
+                                    title,
+                                },
+                            },
+                        },
+                    ],
+                },
+            });
+        }
+    }
+
+    async function ensureHeaderExists(title: string, headers: string[]): Promise<void> {
+        try {
+            const res = await sheets.spreadsheets.values.get({
+                spreadsheetId,
+                range: `${title}!1:1`,
+            });
+            const rows = res.data.values;
+            const hasHeader =
+                Array.isArray(rows) &&
+                rows.length > 0 &&
+                Array.isArray(rows[0]) &&
+                rows[0].some((cell: any) => String(cell ?? '').trim().length > 0);
+            if (hasHeader) return;
+        } catch {
+            // ignore and try to write header
+        }
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: `${title}!A1`,
+            valueInputOption: 'RAW',
+            requestBody: {
+                values: [headers],
+            },
+        });
+    }
+
+    const findings = Array.isArray(payload.findings) ? payload.findings : [];
+    if (!findings.length) {
+        // 没有漏洞时不写 RT_Vulnerabilities，但仍可选择写一行 summary；这里简单跳过
+        // eslint-disable-next-line no-console
+        console.log('[report] (rt) No findings for this analysis, skipping spreadsheet export.');
+        return;
+    }
+
+    // 统计本次分析中的严重度分布
+    const totals: Record<SeverityBucket, number> = {
+        critical: 0,
+        major: 0,
+        minor: 0,
+    };
+
+    function mapBucket(raw: any): SeverityBucket | null {
+        const v = String(raw || '').toLowerCase();
+        if (v === 'critical' || v === 'high') return 'critical';
+        if (v === 'medium') return 'major';
+        if (v === 'low' || v === 'info' || v === 'information') return 'minor';
+        return null;
+    }
+
+    function buildCategories(f: any): string {
+        const id = String(f?.id || '').toLowerCase();
+        const title = String(f?.title || '').toLowerCase();
+        const text = `${id} ${title}`;
+        const groups: string[] = [];
+        if (text.includes('admin-privilege') || text.includes('upgrade-governance') || text.includes('upgrade access control') || text.includes('admin access')) {
+            groups.push('upgrade_governance');
+        }
+        if (text.includes('storage-collision') || text.includes('storage collision')) {
+            groups.push('storage_collision');
+        }
+        if (text.includes('uninitialized') || text.includes('initializer') || text.includes('initialize')) {
+            groups.push('initializer_exposure');
+        }
+        if (text.includes('mixing-patterns') || text.includes('mixing_patterns')) {
+            groups.push('mixing_patterns');
+        }
+        if (text.includes('library-misuse') || text.includes('library_misuse')) {
+            groups.push('library_misuse');
+        }
+        return groups.join(',');
+    }
+
+    const timestamp = new Date().toISOString();
+
+    // sheet 准备：RT_Summary / RT_Vulnerabilities
+    const summarySheet = 'RT_Summary';
+    const vulnSheet = 'RT_Vulnerabilities';
+    await ensureSheetExists(summarySheet);
+    await ensureSheetExists(vulnSheet);
+    await ensureHeaderExists(summarySheet, [
+        'timestamp',
+        'proxy',
+        'logic',
+        'source_mode',
+        'critical_total',
+        'major_total',
+        'minor_total',
+    ]);
+    await ensureHeaderExists(vulnSheet, [
+        'timestamp',
+        'proxy',
+        'logic',
+        'severity_bucket',
+        'raw_severity',
+        'finding_id',
+        'finding_title',
+        'categories',
+    ]);
+
+    const vulnRows: (string | number)[][] = [];
+    for (const f of findings) {
+        const bucket = mapBucket(f?.severity);
+        if (!bucket) continue;
+        totals[bucket]++;
+        vulnRows.push([
+            timestamp,
+            payload.proxy,
+            payload.logic,
+            bucket,
+            String(f?.severity ?? ''),
+            f?.id ?? '',
+            f?.title ?? '',
+            buildCategories(f),
+        ]);
+    }
+
+    const summaryRow: (string | number)[] = [
+        timestamp,
+        payload.proxy,
+        payload.logic,
+        payload.sourceMode,
+        totals.critical,
+        totals.major,
+        totals.minor,
+    ];
+
+    await sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range: `${summarySheet}!A2`,
+        valueInputOption: 'RAW',
+        requestBody: {
+            values: [summaryRow],
+        },
+    });
+
+    if (vulnRows.length > 0) {
+        await sheets.spreadsheets.values.append({
+            spreadsheetId,
+            range: `${vulnSheet}!A2`,
+            valueInputOption: 'RAW',
+            requestBody: {
+                values: vulnRows,
+            },
+        });
+    }
+
+    // eslint-disable-next-line no-console
+    console.log('[report] (rt) Realtime analysis exported to spreadsheet.', {
+        summaryRow: true,
+        vulnRows: vulnRows.length,
     });
 }
 
