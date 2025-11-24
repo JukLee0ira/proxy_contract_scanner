@@ -124,15 +124,59 @@ export async function appendBatchReportToSheet(summary: BatchVulnSummary): Promi
         }
     }
 
+    // 确保首行表头存在（如果为空则写入指定表头）
+    async function ensureHeaderExists(title: string, headers: string[]): Promise<void> {
+        try {
+            const res = await sheets.spreadsheets.values.get({
+                spreadsheetId,
+                range: `${title}!1:1`,
+            });
+            const rows = res.data.values;
+            const hasHeader =
+                Array.isArray(rows) &&
+                rows.length > 0 &&
+                Array.isArray(rows[0]) &&
+                rows[0].some((cell: any) => String(cell ?? '').trim().length > 0);
+            if (hasHeader) return;
+        } catch {
+            // 如果读取失败，则尝试直接写入表头
+        }
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: `${title}!A1`,
+            valueInputOption: 'RAW',
+            requestBody: {
+                values: [headers],
+            },
+        });
+    }
+
     const timestamp = new Date().toISOString();
 
     // 先确保 Summary / Vulnerabilities 两个 sheet 存在
     await ensureSheetExists('Summary');
     await ensureSheetExists('Vulnerabilities');
 
-    // Sheet1: Summary —— 一行写入本次批次的全局统计
+    // 再确保各自的表头存在
+    await ensureHeaderExists('Summary', [
+        'timestamp',
+        'critical_total',
+        'major_total',
+        'minor_total',
+    ]);
+    await ensureHeaderExists('Vulnerabilities', [
+        'timestamp',
+        'address',
+        'severity_bucket',
+        'raw_severity',
+        'finding_id',
+        'finding_title',
+        'categories',
+    ]);
+
+    // Sheet1: Summary —— 一行写入本次批次的全局统计（数据从第 2 行开始）
     const summaryValues: (string | number)[][] = [
-        // 不重复写表头，假定用户预先在 Summary!A1 手动创建表头
         [timestamp, summary.totals.critical, summary.totals.major, summary.totals.minor],
     ];
 

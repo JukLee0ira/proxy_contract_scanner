@@ -454,9 +454,19 @@ async function main() {
             lines.push('Results written to table: proxy_scan_results');
             lines.push('');
             lines.push('📌 Vulnerabilities in this batch');
-            lines.push(`关键值 (critical): ${vulnTotals.critical}`);
-            lines.push(`专业 (major): ${vulnTotals.major}`);
-            lines.push(`次要 (minor): ${vulnTotals.minor}`);
+            lines.push(`critical: ${vulnTotals.critical}`);
+            lines.push(`major: ${vulnTotals.major}`);
+            lines.push(`minor: ${vulnTotals.minor}`);
+
+            // 如果配置了在线报表（Google Sheets），在 TG 报告中附上链接
+            const sheetId = process.env.GOOGLE_SHEETS_ID || process.env.REPORT_SHEET_ID;
+            const sheetUrlFromEnv = process.env.GOOGLE_SHEETS_URL;
+            const sheetUrl = sheetUrlFromEnv || (sheetId ? `https://docs.google.com/spreadsheets/d/${sheetId}/edit` : undefined);
+            if (sheetUrl) {
+                lines.push('');
+                lines.push(`Reported to Google Sheet: ${sheetUrl}`);
+            }
+
             await sendTelegramAlert(lines.join('\n'));
             console.log('[batch] 📤 Batch scan summary sent to Telegram');
         } else {
