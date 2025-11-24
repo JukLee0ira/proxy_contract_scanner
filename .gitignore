@@ -109,3 +109,5 @@ artifacts/
 typechain/
 typechain-types/
 coverage.json
+
+gen-lang-client-0167327331-edf85cf18885.json

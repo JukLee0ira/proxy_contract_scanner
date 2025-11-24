@@ -11,6 +11,7 @@ import { getVerifiedSource } from '../src/clients/etherscan';
 import { isTelegramEnabled, sendTelegramAlert } from '../src/alert/telegram';
 
 type Severity = 'NONE' | 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH';
+type VulnBucket = 'critical' | 'major' | 'minor';
 
 type RiskRow = {
     address: string;
@@ -68,6 +69,31 @@ function classifyFinding(f: any): {
             text.includes('library-misuse') ||
             text.includes('library_misuse'),
     };
+}
+
+/**
+ * 将原始 severity 映射到报表用的 3 档严重等级
+ * - critical: CRITICAL/HIGH
+ * - major:   MEDIUM
+ * - minor:   LOW/INFO/其他
+ */
+function mapFindingSeverityBucket(raw: any): VulnBucket | null {
+    const v = String(raw || '').toLowerCase();
+    if (v === 'critical' || v === 'high') return 'critical';
+    if (v === 'medium') return 'major';
+    if (v === 'low' || v === 'info' || v === 'information') return 'minor';
+    return null;
+}
+
+function buildFindingCategoriesLabel(f: any): string {
+    const cat = classifyFinding(f);
+    const groups: string[] = [];
+    if (cat.upgrade) groups.push('upgrade_governance');
+    if (cat.storage) groups.push('storage_collision');
+    if (cat.initializer) groups.push('initializer_exposure');
+    if (cat.mixing) groups.push('mixing_patterns');
+    if (cat.library) groups.push('library_misuse');
+    return groups.join(',');
 }
 
 async function analyzeOrFetch(address: string): Promise<{ slither: any; sources?: Record<string, string> }> {
@@ -315,6 +341,24 @@ async function main() {
     let analyzed = 0;
     let highRiskCount = 0;
 
+    // 本次批处理中，按 3 档严重等级统计的漏洞总数
+    const vulnTotals: Record<VulnBucket, number> = {
+        critical: 0,
+        major: 0,
+        minor: 0,
+    };
+    // 供后续导出报表（如 Google Sheets）使用的按地址漏洞明细
+    const perAddressVulns: Record<string, {
+        address: string;
+        vulns: {
+            severity: VulnBucket;
+            rawSeverity: string;
+            id?: string;
+            title?: string;
+            category?: string;
+        }[];
+    }> = {};
+
     for (const row of rows) {
         const proxy = String(row.address).trim();
         const logic = String(row.implementation).trim();
@@ -365,6 +409,30 @@ async function main() {
                 risks.raw_report,
             ]);
             console.log(`[batch] 💾 Written to proxy_scan_results: ${risks.address}`);
+
+            // 额外：基于 raw_report 中的 findings 统计漏洞数量，并为后续报表导出收集明细
+            const findings: any[] =
+                (risks.raw_report && (risks.raw_report as any).findings && Array.isArray((risks.raw_report as any).findings))
+                    ? (risks.raw_report as any).findings
+                    : [];
+            if (findings.length) {
+                const addr = risks.address;
+                if (!perAddressVulns[addr]) {
+                    perAddressVulns[addr] = { address: addr, vulns: [] };
+                }
+                for (const f of findings) {
+                    const bucket = mapFindingSeverityBucket(f?.severity);
+                    if (!bucket) continue;
+                    vulnTotals[bucket]++;
+                    perAddressVulns[addr].vulns.push({
+                        severity: bucket,
+                        rawSeverity: String(f?.severity ?? ''),
+                        id: f?.id,
+                        title: f?.title,
+                        category: buildFindingCategoriesLabel(f) || undefined,
+                    });
+                }
+            }
         } catch (e: any) {
             console.error(`[batch] ❌ Analysis/write failed for proxy=${proxy} logic=${logic}:`, e.message || String(e));
         }
@@ -384,6 +452,11 @@ async function main() {
             lines.push(`High-risk addresses (any risk = HIGH): ${highRiskCount}`);
             lines.push('');
             lines.push('Results written to table: proxy_scan_results');
+            lines.push('');
+            lines.push('📌 Vulnerabilities in this batch');
+            lines.push(`关键值 (critical): ${vulnTotals.critical}`);
+            lines.push(`专业 (major): ${vulnTotals.major}`);
+            lines.push(`次要 (minor): ${vulnTotals.minor}`);
             await sendTelegramAlert(lines.join('\n'));
             console.log('[batch] 📤 Batch scan summary sent to Telegram');
         } else {
@@ -391,6 +464,29 @@ async function main() {
         }
     } catch (e: any) {
         console.error('[batch] ⚠️ Failed to send Telegram summary message:', e.message || String(e));
+    }
+
+    // 4) Optional: export this batch report to an online spreadsheet (e.g. Google Sheets)
+    try {
+        const totalVulns =
+            vulnTotals.critical +
+            vulnTotals.major +
+            vulnTotals.minor;
+        const addressesWithVulns = Object.values(perAddressVulns);
+
+        if (totalVulns === 0 || addressesWithVulns.length === 0) {
+            console.log('[batch] ℹ️ No vulnerabilities detected in this batch; skipping spreadsheet export.');
+        } else {
+            // 动态导入，避免在未安装 googleapis 或未配置环境变量时影响现有逻辑
+            const mod = await import('../src/report/googleSheet');
+            // 使用 any 避免在 scripts 目录引入 src 内的类型依赖
+            await (mod as any).appendBatchReportToSheet({
+                totals: vulnTotals,
+                perAddress: addressesWithVulns,
+            });
+        }
+    } catch (e: any) {
+        console.warn('[batch] ⚠️ Failed to export batch report to spreadsheet:', e?.message || String(e));
     }
 }
 
