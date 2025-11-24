@@ -162,41 +162,41 @@ export async function appendBatchReportToSheet(summary: BatchVulnSummary): Promi
     const timestamp = new Date().toISOString();
 
     // 先确保 Summary / Vulnerabilities 两个 sheet 存在
-    await ensureSheetExists('Summary');
-    await ensureSheetExists('Vulnerabilities');
+    const batchSummarySheet = 'Batch_Summary';
+    const batchVulnSheet = 'Batch_Vulnerabilities';
+    await ensureSheetExists(batchSummarySheet);
+    await ensureSheetExists(batchVulnSheet);
 
     // 再确保各自的表头存在
-    await ensureHeaderExists('Summary', [
+    await ensureHeaderExists(batchSummarySheet, [
         'timestamp',
         'critical_total',
         'major_total',
         'minor_total',
     ]);
-    await ensureHeaderExists('Vulnerabilities', [
+    await ensureHeaderExists(batchVulnSheet, [
         'timestamp',
         'address',
         'severity_bucket',
-        'raw_severity',
         'finding_id',
         'finding_title',
-        'categories',
     ]);
 
-    // Sheet1: Summary —— 一行写入本次批次的全局统计（数据从第 2 行开始）
+    // Sheet1: Batch_Summary —— 一行写入本次批次的全局统计（数据从第 2 行开始）
     const summaryValues: (string | number)[][] = [
         [timestamp, summary.totals.critical, summary.totals.major, summary.totals.minor],
     ];
 
     await sheets.spreadsheets.values.append({
         spreadsheetId,
-        range: 'Summary!A2',
+        range: `${batchSummarySheet}!A2`,
         valueInputOption: 'RAW',
         requestBody: {
             values: summaryValues,
         },
     });
 
-    // Sheet2: Vulnerabilities —— 展开为每行一个漏洞明细
+    // Sheet2: Batch_Vulnerabilities —— 展开为每行一个漏洞明细
     const detailRows: (string | number)[][] = [];
     for (const row of summary.perAddress) {
         for (const v of row.vulns) {
@@ -204,10 +204,8 @@ export async function appendBatchReportToSheet(summary: BatchVulnSummary): Promi
                 timestamp,
                 row.address,
                 v.severity,
-                v.rawSeverity,
                 v.id ?? '',
                 v.title ?? '',
-                v.category ?? '',
             ]);
         }
     }
@@ -215,7 +213,7 @@ export async function appendBatchReportToSheet(summary: BatchVulnSummary): Promi
     if (detailRows.length > 0) {
         await sheets.spreadsheets.values.append({
             spreadsheetId,
-            range: 'Vulnerabilities!A2',
+            range: `${batchVulnSheet}!A2`,
             valueInputOption: 'RAW',
             requestBody: {
                 values: detailRows,
@@ -413,10 +411,8 @@ export async function appendRealtimeAnalysisToSheet(payload: RealtimeAnalysisPay
         'proxy',
         'logic',
         'severity_bucket',
-        'raw_severity',
         'finding_id',
         'finding_title',
-        'categories',
     ]);
 
     const vulnRows: (string | number)[][] = [];
@@ -429,10 +425,8 @@ export async function appendRealtimeAnalysisToSheet(payload: RealtimeAnalysisPay
             payload.proxy,
             payload.logic,
             bucket,
-            String(f?.severity ?? ''),
             f?.id ?? '',
             f?.title ?? '',
-            buildCategories(f),
         ]);
     }
 
