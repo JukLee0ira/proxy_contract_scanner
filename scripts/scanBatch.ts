@@ -25,6 +25,49 @@ type RiskRow = {
 
 const SEV_ORDER: Severity[] = ['NONE', 'INFO', 'LOW', 'MEDIUM', 'HIGH'];
 
+// 简单的 sleep，供重试时退避使用
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 粗粒度判断是否属于“网络/节点相关”的错误，方便做重试与统计
+function isNetworkLikeError(err: any): boolean {
+    const msg = (err?.message || String(err || '')).toLowerCase();
+    if (!msg) return false;
+    return [
+        'etimedout',
+        'timeout',
+        'econnreset',
+        'econnrefused',
+        'network error',
+        'socket hang up',
+        '503 service unavailable',
+        '502 bad gateway',
+        '504 gateway timeout',
+        'too many requests',
+        'rate limit',
+        '429',
+        'dns lookup failed',
+    ].some((k) => msg.includes(k));
+}
+
+/**
+ * 运行期中断标记：
+ * - 第一次 Ctrl+C：设置为 true，当前合约处理完毕后安全退出
+ * - 第二次 Ctrl+C：立刻强制退出
+ */
+let interruptRequested = false;
+process.on('SIGINT', () => {
+    if (interruptRequested) {
+        console.log('[batch] ⚠️ Second SIGINT received, exiting immediately.');
+        process.exit(130);
+    }
+    interruptRequested = true;
+    console.log('[batch] ⏹️ SIGINT (Ctrl+C) received, will stop after finishing current address.');
+    console.log('[batch]     Already processed addresses are stored in proxy_scan_results.');
+    console.log('[batch]     Re-run the same command to automatically continue from remaining contracts.');
+});
+
 function maxSeverity(a: Severity, b: Severity): Severity {
     return SEV_ORDER.indexOf(b) > SEV_ORDER.indexOf(a) ? b : a;
 }
@@ -304,42 +347,16 @@ async function main() {
         }
     }
 
-    // 2) Read records from `contracts` where isProxy=true and implementation is non-empty
-    let rows: any[] = [];
-    try {
-        const baseSql = `
-            SELECT
-                address,
-                implementation
-            FROM contracts
-            WHERE "isProxy" = true
-              AND implementation IS NOT NULL
-              AND length(implementation) = 42
-            ORDER BY "lastSeenAt" DESC NULLS LAST
-        `;
-
-        const sql = scanAll ? baseSql : `${baseSql}
-            LIMIT $1`;
-
-        const params = scanAll ? [] : [batchSize];
-
-        const res = await pool.query(sql, params);
-        rows = res.rows;
-        console.log(`[batch] ✅ Selected ${rows.length} addresses from contracts where isProxy=true and implementation is non-empty.`);
-        if (!rows.length) {
-            console.log('[batch] ⚠️ No eligible records to scan, exiting.');
-            await pool.end();
-            return;
-        }
-    } catch (e: any) {
-        console.error('[batch] ❌ Failed to read from contracts:', e.message || String(e));
-        await pool.end();
-        process.exit(1);
-    }
-
+    // 2) 逐批从 `contracts` 读取记录：
+    //    - 只选择 isProxy=true、implementation 非空且长度正确的行
+    //    - 跳过已经在 proxy_scan_results 中存在的地址，实现断点续扫
+    //    - 若设置 BATCH_SIZE，则每次只处理该数量；否则在 scanAll 模式下一次性取完
     let scanned = 0;
     let analyzed = 0;
     let highRiskCount = 0;
+    let networkFailureCount = 0;
+    let otherFailureCount = 0;
+    let consecutiveNetworkFailures = 0;
 
     // 本次批处理中，按 3 档严重等级统计的漏洞总数
     const vulnTotals: Record<VulnBucket, number> = {
@@ -359,17 +376,118 @@ async function main() {
         }[];
     }> = {};
 
-    for (const row of rows) {
-        const proxy = String(row.address).trim();
-        const logic = String(row.implementation).trim();
-        if (!proxy || !logic) {
-            console.log('[batch] ⚠️ Skipping record: proxy or implementation is empty', row);
-            continue;
+    // 循环按批次读取 + 扫描，直到：
+    // - 没有更多未扫描的记录；或
+    // - 收到中断信号（interruptRequested = true）
+    while (true) {
+        if (interruptRequested) {
+            console.log('[batch] ⏹️ Interrupt flag set before fetching next batch, stopping main loop.');
+            break;
         }
-        scanned++;
+
+        let rows: any[] = [];
         try {
-            const risks = await analyzePair(proxy, logic);
-            if (!risks) continue;
+            const baseSql = `
+                SELECT
+                    c.address,
+                    c.implementation
+                FROM contracts c
+                LEFT JOIN proxy_scan_results r
+                    ON LOWER(r.address) = LOWER(c.address)
+                WHERE c."isProxy" = true
+                  AND c.implementation IS NOT NULL
+                  AND length(c.implementation) = 42
+                  AND r.address IS NULL
+                ORDER BY c."lastSeenAt" DESC NULLS LAST
+            `;
+
+            const sql = scanAll || !batchSize
+                ? baseSql
+                : `${baseSql}
+                LIMIT $1`;
+
+            const params = scanAll || !batchSize ? [] : [batchSize];
+
+            const res = await pool.query(sql, params);
+            rows = res.rows;
+            console.log(`[batch] ✅ Fetched ${rows.length} new addresses to scan (skipping already in proxy_scan_results).`);
+            if (!rows.length) {
+                console.log('[batch] 🎉 No more eligible records to scan, exiting main loop.');
+                break;
+            }
+        } catch (e: any) {
+            console.error('[batch] ❌ Failed to read from contracts:', e.message || String(e));
+            await pool.end();
+            process.exit(1);
+        }
+
+        for (const row of rows) {
+            if (interruptRequested) {
+                console.log('[batch] ⏹️ Interrupt flag set, stop before next address.');
+                break;
+            }
+
+            const proxy = String(row.address).trim();
+            const logic = String(row.implementation).trim();
+            if (!proxy || !logic) {
+                console.log('[batch] ⚠️ Skipping record: proxy or implementation is empty', row);
+                continue;
+            }
+            scanned++;
+            // 每个地址内支持有限次重试，主要针对网络/节点类错误
+            const maxRetriesPerAddress = parseInt(process.env.MAX_RETRIES_PER_ADDRESS || '3', 10);
+            const baseDelayMs = parseInt(process.env.RETRY_BASE_DELAY_MS || '1000', 10);
+            const maxConsecutiveNetworkErrors = parseInt(process.env.MAX_CONSECUTIVE_NETWORK_ERRORS || '20', 10);
+
+            let risks: RiskRow | null = null;
+            let attempt = 0;
+
+            while (attempt <= maxRetriesPerAddress && !interruptRequested) {
+                try {
+                    if (attempt > 0) {
+                        console.log(`[batch] 🔁 Retry analyzePair (attempt ${attempt}/${maxRetriesPerAddress}) for proxy=${proxy.toLowerCase()}`);
+                    }
+                    risks = await analyzePair(proxy, logic);
+                    consecutiveNetworkFailures = 0; // 成功一次就清空连续网络错误计数
+                    break;
+                } catch (e: any) {
+                    const isNet = isNetworkLikeError(e);
+                    const msg = e?.message || String(e);
+
+                    if (isNet) {
+                        networkFailureCount++;
+                        consecutiveNetworkFailures++;
+                        console.error(`[batch] 🌐 Network / RPC error for proxy=${proxy} logic=${logic} (attempt ${attempt}): ${msg}`);
+                        if (consecutiveNetworkFailures >= maxConsecutiveNetworkErrors) {
+                            console.error('[batch] 🚨 Too many consecutive network/RPC failures, will stop fetching new batches.');
+                            interruptRequested = true;
+                            break;
+                        }
+
+                        if (attempt < maxRetriesPerAddress) {
+                            const delay = baseDelayMs * (attempt + 1);
+                            console.log(`[batch] ⏳ Will retry after ${delay} ms...`);
+                            await sleep(delay);
+                            attempt++;
+                            continue;
+                        } else {
+                            console.error(`[batch] ❌ Giving up on proxy=${proxy} logic=${logic} after ${maxRetriesPerAddress} retries (network/RPC).`);
+                            break;
+                        }
+                    } else {
+                        otherFailureCount++;
+                        console.error(`[batch] ❌ Non-network analysis error for proxy=${proxy} logic=${logic}:`, msg);
+                        // 非网络错误一般是数据/解析问题，不做重试，直接放弃该地址
+                        break;
+                    }
+                }
+            }
+
+            if (!risks || interruptRequested) {
+                // 没拿到有效结果（多次重试失败），或已经收到中断信号：直接进入下一条 / 退出
+                continue;
+            }
+
             analyzed++;
 
             const hasHigh =
@@ -433,14 +551,24 @@ async function main() {
                     });
                 }
             }
-        } catch (e: any) {
-            console.error(`[batch] ❌ Analysis/write failed for proxy=${proxy} logic=${logic}:`, e.message || String(e));
+        }
+
+        // 如果已经收到中断信号，当前批次处理完毕后跳出主循环
+        if (interruptRequested) {
+            console.log('[batch] ⏹️ Interrupt flag set after finishing current batch, leaving main loop.');
+            break;
         }
     }
 
     await pool.end();
 
-    console.log('[batch] ✅ Batch scan completed:', { scanned, analyzed, highRiskCount });
+    console.log('[batch] ✅ Batch scan completed:', {
+        scanned,
+        analyzed,
+        highRiskCount,
+        networkFailureCount,
+        otherFailureCount,
+    });
 
     // 3) Send only one summary Telegram report (if configured), no per-address alerts
     try {
