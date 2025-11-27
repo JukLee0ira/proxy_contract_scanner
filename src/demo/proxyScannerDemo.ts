@@ -32,6 +32,11 @@ const CONCURRENCY_CONFIG = {
 
 const RPC_URL = process.env.RPC_URL || "http://localhost:8547";
 
+// Simple sleep helper for async backoff
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // PostgreSQL configuration
 const DB_CONFIG = {
     host: process.env.DB_HOST || "localhost",
@@ -1032,7 +1037,9 @@ async function checkProxyTypesBatch(contractAddresses: string[], blockNumber: nu
 }
 
 // Check proxy contract type (keep original interface for fallback)
-async function checkProxyType(contractAddress: string, blockNumber: number = 0) {
+async function checkProxyType(contractAddress: string, blockNumber: number = 0, attempt: number = 0) {
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 10_000;
     try {
         console.log(`Checking proxy contract type: ${contractAddress}`);
 
@@ -1069,7 +1076,19 @@ async function checkProxyType(contractAddress: string, blockNumber: number = 0) 
 
         await processProxyTypeResult(contractAddress, logicResponse, adminResponse, blockNumber);
 
-    } catch (error) {
+    } catch (error: any) {
+        const msg = error?.message || String(error || '');
+        const isRateLimit =
+            msg.includes('Too many requests') ||
+            msg.includes('rate limit') ||
+            (error?.code === 'BAD_DATA' && /Too many requests/i.test(JSON.stringify(error?.value || '')));
+
+        if (isRateLimit && attempt < MAX_RETRIES) {
+            console.warn(`[rate-limit] eth_getStorageAt hit rate limit for ${contractAddress}, attempt=${attempt + 1}/${MAX_RETRIES}. Waiting ${RETRY_DELAY_MS}ms before retry...`);
+            await sleep(RETRY_DELAY_MS);
+            return checkProxyType(contractAddress, blockNumber, attempt + 1);
+        }
+
         console.error(`Error occurred when checking proxy contract ${contractAddress} type:`, error);
     }
 }
@@ -1398,11 +1417,17 @@ async function main() {
             isDatabaseAvailable = false;
         }
 
-        // Initialize proxy event listener
-        console.log("Initializing proxy event listener...");
-        proxyEventListener = new ProxyEventListener(provider, 50); // Limit to 50 concurrent listeners
-        console.log("Proxy event listener initialized successfully");
-        console.log(`Event listener capacity: ${proxyEventListener.getListenerStatus().max} listeners`);
+        // Initialize proxy event listener (can be disabled for RPC endpoints that do not support eth_newFilter)
+        const eventListenerDisabled = process.env.DISABLE_EVENT_LISTENER === '1';
+        if (eventListenerDisabled) {
+            console.log("[events] Proxy event listener disabled by DISABLE_EVENT_LISTENER=1; upgrade events will not be tracked.");
+            proxyEventListener = null;
+        } else {
+            console.log("Initializing proxy event listener...");
+            proxyEventListener = new ProxyEventListener(provider, 50); // Limit to 50 concurrent listeners
+            console.log("Proxy event listener initialized successfully");
+            console.log(`Event listener capacity: ${proxyEventListener.getListenerStatus().max} listeners`);
+        }
 
         // Initialize storage slot monitor for non-EIP1967 proxies
         console.log("Initializing storage slot monitor...");
@@ -1433,12 +1458,22 @@ async function main() {
             console.error("Queue consumer error:", error);
         });
 
-        provider.on("block", async (blockNumber: number) => {
-            console.log(`New block discovered: ${blockNumber}`);
+        // 允许通过环境变量在某些场景（例如大批量 /monitor 回放）关闭实时区块扫描，以避免 RPC 频率过高
+        const liveScanDisabled = process.env.DISABLE_LIVE_SCAN === '1';
+        if (liveScanDisabled) {
+            console.log("[scan] Live block scanning disabled by DISABLE_LIVE_SCAN=1; HTTP API and /monitor remain available.");
+        } else {
+            provider.on("block", async (blockNumber: number) => {
+                console.log(`New block discovered: ${blockNumber}`);
 
-            // Use concurrency controller to process block
-            await processBlockWithConcurrency(blockNumber);
-        });
+                try {
+                    // Use concurrency controller to process block
+                    await processBlockWithConcurrency(blockNumber);
+                } catch (error) {
+                    console.error(`Error while processing block ${blockNumber}:`, error);
+                }
+            });
+        }
     } catch (error) {
         console.error("Failed to start application:", error);
         process.exit(1);

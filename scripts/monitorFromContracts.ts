@@ -32,16 +32,29 @@ async function main() {
 
     // 批量大小可通过环境变量控制，默认每批 100 条地址
     const batchSize = parseInt(process.env.CONTRACTS_BATCH_SIZE || '100', 10);
+    // 可选：总共最多处理多少条地址（用于「只跑一小批」的回放场景），0 表示不限
+    const totalLimit = parseInt(process.env.CONTRACTS_TOTAL_LIMIT || '0', 10);
 
     let offset = 0;
     let totalSent = 0;
+    let totalReleased = 0;
 
     try {
         // 简单的分页扫描：按 lastSeenAt 倒序，每批 LIMIT + OFFSET
         while (true) {
+            // 如果配置了总上限，则在超过后立即停止，不再继续翻页
+            if (totalLimit > 0 && offset >= totalLimit) {
+                console.log(`[monitorFromContracts] 🎯 Reached CONTRACTS_TOTAL_LIMIT=${totalLimit}, stop feeding.`);
+                break;
+            }
+
             const client = await pool.connect();
             let rows: { address: string }[] = [];
             try {
+                // 若配置了总上限，则本批的 LIMIT 不要超过剩余可处理数量
+                const effectiveBatchSize =
+                    totalLimit > 0 ? Math.min(batchSize, Math.max(0, totalLimit - offset)) : batchSize;
+
                 const sql = `
                     SELECT
                         address
@@ -49,7 +62,7 @@ async function main() {
                     ORDER BY "lastSeenAt" DESC NULLS LAST
                     LIMIT $1 OFFSET $2
                 `;
-                const res = await client.query(sql, [batchSize, offset]);
+                const res = await client.query(sql, [effectiveBatchSize, offset]);
                 rows = res.rows;
             } catch (e: any) {
                 console.error('[monitorFromContracts] ❌ Failed to read from contracts:', e.message || String(e));
@@ -79,6 +92,29 @@ async function main() {
                     if ((resp.data as any)?.ok) {
                         totalSent++;
                         console.log(`[monitorFromContracts] ▶️ /monitor accepted address=${addr}`);
+
+                        // 对于批处理场景，我们只需要“一次性补数据 + 安全分析”，不需要长期监听后续升级。
+                        // 因此在登记完成后立刻调用 DELETE /monitor/:address 释放监听与存储监控。
+                        try {
+                            const delResp = await axios.delete(
+                                `${apiUrl}/monitor/${addr}`,
+                                { timeout: 15000 }
+                            );
+                            if ((delResp.data as any)?.ok) {
+                                totalReleased++;
+                                console.log(`[monitorFromContracts] 🔽 /monitor released address=${addr}`);
+                            } else {
+                                console.warn(
+                                    `[monitorFromContracts] ⚠️ /monitor delete responded without ok for address=${addr}:`,
+                                    delResp.data
+                                );
+                            }
+                        } catch (e: any) {
+                            console.error(
+                                `[monitorFromContracts] ⚠️ /monitor delete failed for address=${addr}:`,
+                                e instanceof Error ? e.message : String(e)
+                            );
+                        }
                     } else {
                         console.warn(
                             `[monitorFromContracts] ⚠️ /monitor responded without ok for address=${addr}:`,
@@ -101,6 +137,7 @@ async function main() {
 
     console.log('[monitorFromContracts] ✅ Completed feeding addresses into /monitor pipeline:', {
         totalSent,
+        totalReleased,
     });
 }
 
