@@ -32,6 +32,11 @@ const CONCURRENCY_CONFIG = {
 
 const RPC_URL = process.env.RPC_URL || "http://localhost:8547";
 
+// 控制发现阶段（discovery）是否发送逐条 Telegram 告警：
+// - 默认为发送；
+// - 当 DISABLE_DISCOVERY_TELEGRAM=1 时，批处理场景下只保留批量报告，不发送每个 proxy 的短提示。
+const DISCOVERY_TG_DISABLED = process.env.DISABLE_DISCOVERY_TELEGRAM === '1';
+
 // Simple sleep helper for async backoff
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -647,18 +652,20 @@ class StorageSlotMonitor {
             await saveOrUpdateProxyContract(proxyAddress, newImplementation, '', 0, '');
             console.log(`✅ Storage slot upgrade saved to database: ${proxyAddress} -> ${newImplementation} (${detectionMethod})`);
 
-            // Telegram alert (non-blocking)
-            try {
-                if (isTelegramEnabled()) {
-                    const message = buildUpgradeAlertMessage({
-                        proxyAddress,
-                        newImplementation,
-                        detection: 'storage',
-                    });
-                    await sendTelegramAlert(message);
+            // Telegram alert (non-blocking) —— 批处理场景下可通过 DISABLE_DISCOVERY_TELEGRAM=1 关闭逐条提示
+            if (!DISCOVERY_TG_DISABLED) {
+                try {
+                    if (isTelegramEnabled()) {
+                        const message = buildUpgradeAlertMessage({
+                            proxyAddress,
+                            newImplementation,
+                            detection: 'storage',
+                        });
+                        await sendTelegramAlert(message);
+                    }
+                } catch (alertErr) {
+                    console.warn(`Telegram alert error (storage): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                 }
-            } catch (alertErr) {
-                console.warn(`Telegram alert error (storage): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
             }
 
             // Trigger security analysis asynchronously if analyze mode is enabled
@@ -1170,19 +1177,21 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
                         blockNumber
                     );
 
-                    // Telegram alert on discovery for standard proxy
-                    try {
-                        if (isTelegramEnabled()) {
-                            const message = buildUpgradeAlertMessage({
-                                proxyAddress: contractAddress,
-                                newImplementation: logicStorageValue,
-                                blockNumber,
-                                detection: 'discovery',
-                            });
-                            await sendTelegramAlert(message);
+                    // Telegram alert on discovery for standard proxy（可通过 DISABLE_DISCOVERY_TELEGRAM 关闭逐条提示）
+                    if (!DISCOVERY_TG_DISABLED) {
+                        try {
+                            if (isTelegramEnabled()) {
+                                const message = buildUpgradeAlertMessage({
+                                    proxyAddress: contractAddress,
+                                    newImplementation: logicStorageValue,
+                                    blockNumber,
+                                    detection: 'discovery',
+                                });
+                                await sendTelegramAlert(message);
+                            }
+                        } catch (alertErr) {
+                            console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                         }
-                    } catch (alertErr) {
-                        console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                     }
 
                     // Trigger security analysis for discovered proxy if analyze mode is enabled
@@ -1234,19 +1243,21 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
                         blockNumber
                     );
 
-                    // Telegram alert on discovery for non-EIP1967 proxy
-                    try {
-                        if (isTelegramEnabled()) {
-                            const message = buildUpgradeAlertMessage({
-                                proxyAddress: contractAddress,
-                                newImplementation: logicStorageValue,
-                                blockNumber,
-                                detection: 'discovery',
-                            });
-                            await sendTelegramAlert(message);
+                    // Telegram alert on discovery for non-EIP1967 proxy（可通过 DISABLE_DISCOVERY_TELEGRAM 关闭逐条提示）
+                    if (!DISCOVERY_TG_DISABLED) {
+                        try {
+                            if (isTelegramEnabled()) {
+                                const message = buildUpgradeAlertMessage({
+                                    proxyAddress: contractAddress,
+                                    newImplementation: logicStorageValue,
+                                    blockNumber,
+                                    detection: 'discovery',
+                                });
+                                await sendTelegramAlert(message);
+                            }
+                        } catch (alertErr) {
+                            console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                         }
-                    } catch (alertErr) {
-                        console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                     }
 
                     // Trigger security analysis for discovered non-EIP1967 proxy if analyze mode is enabled

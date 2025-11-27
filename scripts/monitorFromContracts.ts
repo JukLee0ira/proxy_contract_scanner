@@ -139,6 +139,16 @@ async function main() {
         totalSent,
         totalReleased,
     });
+
+    // 可选：在批处理完成后，复用现有 scanBatch.ts 的逻辑生成一次 Batch Proxy Scan Summary 报告
+    // - 这样可以保持报告内容/格式与手动运行 scripts/scanBatch.ts 一致
+    // - 具体扫描范围 & 每批大小仍由 BATCH_SIZE / SCAN_ALL 等环境变量控制
+    try {
+        console.log('[monitorFromContracts] ▶️ Triggering scanBatch-based summary (Batch Proxy Scan Summary)...');
+        await import('./scanBatch');
+    } catch (e: any) {
+        console.error('[monitorFromContracts] ⚠️ Failed to run scanBatch summary after feeding /monitor:', e?.message || String(e));
+    }
 }
 
 main().catch((e: any) => {
