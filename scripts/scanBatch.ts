@@ -575,7 +575,8 @@ async function main() {
         if (isTelegramEnabled()) {
             const lines: string[] = [];
             lines.push('📊 Batch Proxy Scan Summary');
-            lines.push(`Scanned addresses (isProxy=true with implementation): ${scanned}`);
+            // 文案不再强调 isProxy，避免与新的数据流（不再依赖 isProxy 预过滤）产生混淆
+            lines.push(`Scanned addresses (from contracts with implementation): ${scanned}`);
             lines.push(`Pairs successfully analyzed: ${analyzed}`);
             lines.push(`High-risk addresses (any risk = HIGH): ${highRiskCount}`);
             lines.push('');
