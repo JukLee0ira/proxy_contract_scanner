@@ -387,18 +387,20 @@ async function main() {
 
         let rows: any[] = [];
         try {
+            // 候选来源改为 proxy_contracts：
+            // - 只对已经通过 /monitor 判定为代理、且有 logic_contract 的记录做配对安全分析
+            // - 避免再次依赖 contracts.isProxy 这一旧字段
             const baseSql = `
                 SELECT
-                    c.address,
-                    c.implementation
-                FROM contracts c
+                    p.proxy_address AS address,
+                    p.logic_contract AS implementation
+                FROM proxy_contracts p
                 LEFT JOIN proxy_scan_results r
-                    ON LOWER(r.address) = LOWER(c.address)
-                WHERE c."isProxy" = true
-                  AND c.implementation IS NOT NULL
-                  AND length(c.implementation) = 42
+                    ON LOWER(r.address) = LOWER(p.proxy_address)
+                WHERE p.logic_contract IS NOT NULL
+                  AND length(p.logic_contract) = 42
                   AND r.address IS NULL
-                ORDER BY c."lastSeenAt" DESC NULLS LAST
+                ORDER BY p.detected_at DESC NULLS LAST
             `;
 
             const sql = scanAll || !batchSize
