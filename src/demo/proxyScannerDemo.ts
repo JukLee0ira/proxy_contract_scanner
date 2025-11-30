@@ -32,10 +32,18 @@ const CONCURRENCY_CONFIG = {
 
 const RPC_URL = process.env.RPC_URL || "http://localhost:8547";
 
-// 控制发现阶段（discovery）是否发送逐条 Telegram 告警：
+// 批处理模式总开关：
+// - BATCH_MONITOR_MODE=1 时，等价于同时：
+//   - DISABLE_LIVE_SCAN=1
+//   - DISABLE_EVENT_LISTENER=1
+//   - DISABLE_DISCOVERY_TELEGRAM=1
+// - 仍然保留三个细粒度开关，便于在其他场景单独控制
+const BATCH_MONITOR_MODE = process.env.BATCH_MONITOR_MODE === '1';
+
+// 控制发现阶段（discovery/storage）是否发送逐条 Telegram 告警：
 // - 默认为发送；
-// - 当 DISABLE_DISCOVERY_TELEGRAM=1 时，批处理场景下只保留批量报告，不发送每个 proxy 的短提示。
-const DISCOVERY_TG_DISABLED = process.env.DISABLE_DISCOVERY_TELEGRAM === '1';
+// - 当 DISABLE_DISCOVERY_TELEGRAM=1 或 BATCH_MONITOR_MODE=1 时，只保留批量报告，不发送每个 proxy 的短提示。
+const DISCOVERY_TG_DISABLED = BATCH_MONITOR_MODE || process.env.DISABLE_DISCOVERY_TELEGRAM === '1';
 
 // Simple sleep helper for async backoff
 function sleep(ms: number): Promise<void> {
@@ -1429,7 +1437,7 @@ async function main() {
         }
 
         // Initialize proxy event listener (can be disabled for RPC endpoints that do not support eth_newFilter)
-        const eventListenerDisabled = process.env.DISABLE_EVENT_LISTENER === '1';
+        const eventListenerDisabled = BATCH_MONITOR_MODE || process.env.DISABLE_EVENT_LISTENER === '1';
         if (eventListenerDisabled) {
             console.log("[events] Proxy event listener disabled by DISABLE_EVENT_LISTENER=1; upgrade events will not be tracked.");
             proxyEventListener = null;
@@ -1470,7 +1478,7 @@ async function main() {
         });
 
         // 允许通过环境变量在某些场景（例如大批量 /monitor 回放）关闭实时区块扫描，以避免 RPC 频率过高
-        const liveScanDisabled = process.env.DISABLE_LIVE_SCAN === '1';
+        const liveScanDisabled = BATCH_MONITOR_MODE || process.env.DISABLE_LIVE_SCAN === '1';
         if (liveScanDisabled) {
             console.log("[scan] Live block scanning disabled by DISABLE_LIVE_SCAN=1; HTTP API and /monitor remain available.");
         } else {
