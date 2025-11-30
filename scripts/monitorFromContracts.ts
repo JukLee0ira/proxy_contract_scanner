@@ -32,8 +32,15 @@ async function main() {
 
     // 批量大小可通过环境变量控制，默认每批 100 条地址
     const batchSize = parseInt(process.env.CONTRACTS_BATCH_SIZE || '100', 10);
-    // 可选：总共最多处理多少条地址（用于「只跑一小批」的回放场景），0 表示不限
-    const totalLimit = parseInt(process.env.CONTRACTS_TOTAL_LIMIT || '0', 10);
+    // 可选：总共最多处理多少条地址（用于「只跑一小批」的回放场景）
+    // - 数字 N  表示最多处理 N 条
+    // - "all" 或未设置 / 非法值 表示不限（全表）
+    const rawTotalLimit = process.env.CONTRACTS_TOTAL_LIMIT;
+    let totalLimit = 0;
+    if (rawTotalLimit && rawTotalLimit.toLowerCase() !== 'all') {
+        const parsed = parseInt(rawTotalLimit, 10);
+        totalLimit = Number.isNaN(parsed) ? 0 : parsed;
+    }
 
     let offset = 0;
     let totalSent = 0;
