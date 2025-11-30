@@ -575,10 +575,11 @@ async function main() {
         if (isTelegramEnabled()) {
             const lines: string[] = [];
             lines.push('📊 Batch Proxy Scan Summary');
-            // 文案不再强调 isProxy，避免与新的数据流（不再依赖 isProxy 预过滤）产生混淆
-            lines.push(`Scanned addresses (from contracts with implementation): ${scanned}`);
-            lines.push(`Pairs successfully analyzed: ${analyzed}`);
-            lines.push(`High-risk addresses (any risk = HIGH): ${highRiskCount}`);
+            // scanned: 本轮从数据库选出的「待分析候选记录」总数
+            lines.push(`Candidate records selected for analysis in this batch: ${scanned}`);
+            // analyzed: 实际成功完成 proxy-logic 配对安全分析的数量
+            lines.push(`Pairs successfully analyzed (proxy + logic): ${analyzed}`);
+            lines.push(`High-risk proxies (any risk = HIGH): ${highRiskCount}`);
             lines.push('');
             lines.push('Results written to table: proxy_scan_results');
             lines.push('');
