@@ -418,7 +418,18 @@ async function main() {
                 break;
             }
         } catch (e: any) {
-            console.error('[batch] ❌ Failed to read from contracts:', e.message || String(e));
+            const code = (e as any)?.code || (e as any)?.original?.code;
+            const msg = (e as any)?.message || String(e);
+
+            // 42P01: undefined_table —— proxy_contracts 表不存在，给出更明确的指引
+            if (code === '42P01') {
+                console.error('[batch] ❌ Required table "proxy_contracts" does not exist in this database.');
+                console.error('[batch]     - Ensure the scanner API (src/index.ts) has been started at least once with this database config,');
+                console.error('[batch]     - so that createTablesIfNotExist() in proxyScannerDemo.ts can create proxy_contracts.');
+                console.error('[batch]     - Also make sure DB_HOST/DB_NAME for src/index.ts match XDC_META_DB_URL used for scanBatch/monitorFromContracts.');
+            } else {
+                console.error('[batch] ❌ Failed to read from proxy_contracts:', msg);
+            }
             await pool.end();
             process.exit(1);
         }
