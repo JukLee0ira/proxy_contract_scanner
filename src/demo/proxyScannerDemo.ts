@@ -23,11 +23,19 @@ dotenv.config();
 
 // Concurrency control configuration
 const CONCURRENCY_CONFIG = {
-    MAX_CONCURRENT_BLOCKS: 3,     // Maximum number of blocks to process simultaneously
+    MAX_CONCURRENT_BLOCKS: 1,     // Maximum number of blocks to process simultaneously
     MAX_CONCURRENT_STORAGE_QUERIES: 5,  // Maximum concurrency for batch storage queries
     BATCH_SIZE: 10,               // Queue batch consumption size
     QUEUE_PROCESS_INTERVAL: 1000  // Queue processing interval (ms)
 };
+
+// In-memory de-dup sets to avoid duplicate Telegram alerts within a single process
+const SENT_DISCOVERY_ALERT_KEYS = new Set<string>();
+const SENT_ANALYSIS_ALERT_KEYS = new Set<string>();
+
+function makePairKey(proxy: string, logic: string): string {
+    return `${proxy.toLowerCase()}::${logic.toLowerCase()}`;
+}
 
 
 const RPC_URL = process.env.RPC_URL || "http://localhost:8547";
@@ -234,33 +242,37 @@ class ProxyEventListener {
             const newImplementation = (ethers as any).getAddress('0x' + addressFromTopic);
             console.log(`  - New implementation: ${newImplementation}`);
 
-            // Save upgrade event to database
-            await this.saveUpgradeEvent(proxyAddress, newImplementation, log.transactionHash, log.blockNumber);
+            // Save upgrade event to database（只有真正 slot 变化时才返回 true）
+            const updated = await this.saveUpgradeEvent(proxyAddress, newImplementation, log.transactionHash, log.blockNumber);
 
-            // Telegram alert (non-blocking)
-            try {
-                if (isTelegramEnabled()) {
-                    const message = buildUpgradeAlertMessage({
-                        proxyAddress,
-                        newImplementation,
-                        blockNumber: log.blockNumber,
-                        txHash: log.transactionHash,
-                        detection: 'event',
-                    });
-                    await sendTelegramAlert(message);
-                }
-            } catch (alertErr) {
-                console.warn(`Telegram alert error (event): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
-            }
-
-            // Trigger security analysis for this specific pair if analyze mode is enabled
-            if (analyzeModeEnabled) {
+            if (updated) {
+                // Telegram alert (non-blocking)
                 try {
-                    console.log(`[analyze] Triggering checks for upgraded pair proxy=${proxyAddress} logic=${newImplementation}`);
-                    await analyzePairAddresses(proxyAddress.toLowerCase(), newImplementation.toLowerCase(), selectedPairCheckKeys);
-                } catch (e: any) {
-                    console.error(`[analyze] Pair analysis failed for ${proxyAddress} -> ${newImplementation}: ${e?.message || String(e)}`);
+                    if (isTelegramEnabled()) {
+                        const message = buildUpgradeAlertMessage({
+                            proxyAddress,
+                            newImplementation,
+                            blockNumber: log.blockNumber,
+                            txHash: log.transactionHash,
+                            detection: 'event',
+                        });
+                        await sendTelegramAlert(message);
+                    }
+                } catch (alertErr) {
+                    console.warn(`Telegram alert error (event): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                 }
+
+                // Trigger security analysis for this specific pair if analyze mode is enabled
+                if (analyzeModeEnabled) {
+                    try {
+                        console.log(`[analyze] Triggering checks for upgraded pair proxy=${proxyAddress} logic=${newImplementation}`);
+                        await analyzePairAddresses(proxyAddress.toLowerCase(), newImplementation.toLowerCase(), selectedPairCheckKeys);
+                    } catch (e: any) {
+                        console.error(`[analyze] Pair analysis failed for ${proxyAddress} -> ${newImplementation}: ${e?.message || String(e)}`);
+                    }
+                }
+            } else {
+                console.log(`[event-skip] Upgrade event for ${proxyAddress} -> ${newImplementation} did not change logic slot, skip alerts/analysis.`);
             }
 
         } catch (error) {
@@ -271,17 +283,21 @@ class ProxyEventListener {
     /**
      * Save upgrade event to database
      */
-    private async saveUpgradeEvent(proxyAddress: string, newImplementation: string, txHash: string, blockNumber: number): Promise<void> {
+    private async saveUpgradeEvent(proxyAddress: string, newImplementation: string, txHash: string, blockNumber: number): Promise<boolean> {
         if (!isDatabaseAvailable) {
             console.log(`Database not available, upgrade event logged but not saved: ${proxyAddress} -> ${newImplementation}`);
-            return;
+            return false;
         }
 
         try {
-            await saveOrUpdateProxyContract(proxyAddress, newImplementation, '', blockNumber, txHash);
-            console.log(`✅ Upgrade event saved to database: ${proxyAddress} -> ${newImplementation}`);
+            const updated = await saveOrUpdateProxyContract(proxyAddress, newImplementation, '', blockNumber, txHash);
+            if (updated) {
+                console.log(`✅ Upgrade event saved to database: ${proxyAddress} -> ${newImplementation}`);
+            }
+            return updated;
         } catch (error) {
             console.error(`Failed to save upgrade event to database:`, error);
+            return false;
         }
     }
 
@@ -649,46 +665,53 @@ class StorageSlotMonitor {
     /**
      * Save upgrade event to database
      */
-    private async saveUpgradeEvent(proxyAddress: string, newImplementation: string, detectionMethod: string): Promise<void> {
+    private async saveUpgradeEvent(proxyAddress: string, newImplementation: string, detectionMethod: string): Promise<boolean> {
         if (!isDatabaseAvailable) {
             console.log(`Database not available, upgrade event logged but not saved: ${proxyAddress} -> ${newImplementation}`);
-            return;
+            return false;
         }
 
         try {
             // For storage slot monitoring, we don't have transaction hash, so we pass empty string
-            await saveOrUpdateProxyContract(proxyAddress, newImplementation, '', 0, '');
-            console.log(`✅ Storage slot upgrade saved to database: ${proxyAddress} -> ${newImplementation} (${detectionMethod})`);
+            const updated = await saveOrUpdateProxyContract(proxyAddress, newImplementation, '', 0, '');
+            if (updated) {
+                console.log(`✅ Storage slot upgrade saved to database: ${proxyAddress} -> ${newImplementation} (${detectionMethod})`);
 
-            // Telegram alert (non-blocking) —— 批处理场景下可通过 DISABLE_DISCOVERY_TELEGRAM=1 关闭逐条提示
-            if (!DISCOVERY_TG_DISABLED) {
-                try {
-                    if (isTelegramEnabled()) {
-                        const message = buildUpgradeAlertMessage({
-                            proxyAddress,
-                            newImplementation,
-                            detection: 'storage',
-                        });
-                        await sendTelegramAlert(message);
+                // Telegram alert (non-blocking) —— 批处理场景下可通过 DISABLE_DISCOVERY_TELEGRAM=1 关闭逐条提示
+                if (!DISCOVERY_TG_DISABLED) {
+                    try {
+                        if (isTelegramEnabled()) {
+                            const message = buildUpgradeAlertMessage({
+                                proxyAddress,
+                                newImplementation,
+                                detection: 'storage',
+                            });
+                            await sendTelegramAlert(message);
+                        }
+                    } catch (alertErr) {
+                        console.warn(`Telegram alert error (storage): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                     }
-                } catch (alertErr) {
-                    console.warn(`Telegram alert error (storage): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                 }
+
+                // Trigger security analysis asynchronously if analyze mode is enabled
+                if (analyzeModeEnabled) {
+                    try {
+                        console.log(`[analyze] Triggering checks (storage) for upgraded pair proxy=${proxyAddress} logic=${newImplementation}`);
+                        // Fire and forget; do not block the monitoring loop
+                        analyzePairAddresses(proxyAddress.toLowerCase(), newImplementation.toLowerCase(), selectedPairCheckKeys)
+                            .catch((e) => console.error(`[analyze] Background analysis failed for ${proxyAddress}:`, e instanceof Error ? e.message : String(e)));
+                    } catch (e) {
+                        console.error(`[analyze] Failed to schedule analysis for ${proxyAddress}:`, e instanceof Error ? e.message : String(e));
+                    }
+                }
+            } else {
+                console.log(`[storage-skip] No logic slot change for ${proxyAddress} -> ${newImplementation}, skip alerts/analysis.`);
             }
 
-            // Trigger security analysis asynchronously if analyze mode is enabled
-            if (analyzeModeEnabled) {
-                try {
-                    console.log(`[analyze] Triggering checks (storage) for upgraded pair proxy=${proxyAddress} logic=${newImplementation}`);
-                    // Fire and forget; do not block the monitoring loop
-                    analyzePairAddresses(proxyAddress.toLowerCase(), newImplementation.toLowerCase(), selectedPairCheckKeys)
-                        .catch((e) => console.error(`[analyze] Background analysis failed for ${proxyAddress}:`, e instanceof Error ? e.message : String(e)));
-                } catch (e) {
-                    console.error(`[analyze] Failed to schedule analysis for ${proxyAddress}:`, e instanceof Error ? e.message : String(e));
-                }
-            }
+            return updated;
         } catch (error) {
             console.error(`Failed to save storage slot upgrade to database:`, error);
+            return false;
         }
     }
 
@@ -809,62 +832,77 @@ async function createTablesIfNotExist() {
     }
 }
 
-async function saveOrUpdateProxyContract(proxyAddress: string, logicContract: string, adminContract: string = '', blockNumber: number, upgradeTxHash: string = '') {
+// 返回值：true 表示写入了新记录（初次发现或实现升级）；false 表示逻辑未变、忽略本次
+async function saveOrUpdateProxyContract(proxyAddress: string, logicContract: string, adminContract: string = '', blockNumber: number, upgradeTxHash: string = ''): Promise<boolean> {
     if (!isDatabaseAvailable || !pool) {
         console.log(`Database not available, skipping save for proxy contract: ${proxyAddress}`);
-        return;
+        return false;
     }
 
     const client = await pool.connect();
     try {
-        // Check if proxy contract with same logic contract already exists
-        const existingQuery = 'SELECT proxy_address FROM proxy_contracts WHERE proxy_address = $1 AND logic_contract = $2';
-        const existingResult = await client.query(existingQuery, [proxyAddress.toLowerCase(), logicContract.toLowerCase()]);
+        const lowerProxy = proxyAddress.toLowerCase();
+        const lowerLogic = logicContract.toLowerCase();
+        const lowerAdmin = adminContract ? adminContract.toLowerCase() : null;
+
+        // 1) 查当前 DB 中这条 proxy 的最新记录（用于判断 slot 是否变化）
+        const existingQuery = 'SELECT proxy_address, logic_contract, admin_contract FROM proxy_contracts WHERE proxy_address = $1 ORDER BY detected_at DESC LIMIT 1';
+        const existingResult = await client.query(existingQuery, [lowerProxy]);
 
         if (existingResult.rows.length > 0) {
-            // Proxy contract with same logic contract already exists, skip insertion
-            console.log(`⏭️  Skipped: proxy contract ${proxyAddress} with logic ${logicContract} already exists`);
-            return;
-        } else {
-            // Insert new proxy contract record (even if proxy_address exists with different logic)
-            let insertQuery = ``;
-            let queryParams: any[] = [];
+            const row = existingResult.rows[0];
+            const dbLogic: string | null = row.logic_contract;
 
-            if (upgradeTxHash) {
-                // Include upgrade_tx_hash if provided (for upgrade events)
-                insertQuery = `
-                    INSERT INTO proxy_contracts (proxy_address, logic_contract, admin_contract, block_number, upgrade_tx_hash)
-                    VALUES ($1, $2, $3, $4, $5)
-                `;
-                queryParams = [
-                    proxyAddress.toLowerCase(),
-                    logicContract.toLowerCase(),
-                    adminContract ? adminContract.toLowerCase() : null,
-                    blockNumber,
-                    upgradeTxHash
-                ];
-            } else {
-                // Original insert without upgrade_tx_hash (for discovery)
-                insertQuery = `
-                    INSERT INTO proxy_contracts (proxy_address, logic_contract, admin_contract, block_number)
-                    VALUES ($1, $2, $3, $4)
-                `;
-                queryParams = [
-                    proxyAddress.toLowerCase(),
-                    logicContract.toLowerCase(),
-                    adminContract ? adminContract.toLowerCase() : null,
-                    blockNumber
-                ];
+            // 如果逻辑合约没有变化：认为只是链上有新交互，但实现没变 —— 不写入新记录
+            if (dbLogic && dbLogic.toLowerCase() === lowerLogic) {
+                console.log(`⏭️  Skipped DB write: proxy ${lowerProxy} already uses logic ${lowerLogic}, no slot change.`);
+                return false;
             }
 
-            await client.query(insertQuery, queryParams);
-            
-            if (upgradeTxHash) {
-                console.log(`🆕 Inserted upgrade event record: ${proxyAddress} -> ${logicContract} (tx: ${upgradeTxHash})`);
-            } else {
-                console.log(`🆕 Inserted new proxy contract record: ${proxyAddress} -> ${logicContract}`);
-            }
+            // 逻辑变了：这是一次真正的升级，允许继续写入
+            console.log(`🔁 Logic slot changed for proxy ${lowerProxy}: ${dbLogic} -> ${lowerLogic}`);
         }
+
+        // 2) 写入新记录（初次发现，或逻辑升级）
+        let insertQuery = ``;
+        let queryParams: any[] = [];
+
+        if (upgradeTxHash) {
+            // Include upgrade_tx_hash if provided (for upgrade events)
+            insertQuery = `
+                INSERT INTO proxy_contracts (proxy_address, logic_contract, admin_contract, block_number, upgrade_tx_hash)
+                VALUES ($1, $2, $3, $4, $5)
+            `;
+            queryParams = [
+                lowerProxy,
+                lowerLogic,
+                lowerAdmin,
+                blockNumber,
+                upgradeTxHash
+            ];
+        } else {
+            // Original insert without upgrade_tx_hash (for discovery)
+            insertQuery = `
+                INSERT INTO proxy_contracts (proxy_address, logic_contract, admin_contract, block_number)
+                VALUES ($1, $2, $3, $4)
+            `;
+            queryParams = [
+                lowerProxy,
+                lowerLogic,
+                lowerAdmin,
+                blockNumber
+            ];
+        }
+
+        await client.query(insertQuery, queryParams);
+        
+        if (upgradeTxHash) {
+            console.log(`🆕 Inserted upgrade event record: ${proxyAddress} -> ${logicContract} (tx: ${upgradeTxHash})`);
+        } else {
+            console.log(`🆕 Inserted new proxy contract record: ${proxyAddress} -> ${logicContract}`);
+        }
+
+        return true;
     } catch (error) {
         console.error(`Error saving proxy contract ${proxyAddress}:`, error);
         throw error;
@@ -1178,27 +1216,38 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
 
                 // Save to database with logic and admin contract information
                 try {
-                    await saveOrUpdateProxyContract(
+                    const updated = await saveOrUpdateProxyContract(
                         contractAddress,
                         logicStorageValue,
                         isValidAddress(adminStorageValue) && !isAdminZero ? adminStorageValue : '',
                         blockNumber
                     );
 
+                    if (!updated) {
+                        console.log(`[discovery-skip] Proxy ${contractAddress} logic slot unchanged (${logicStorageValue}), skip alerts/analysis.`);
+                        return;
+                    }
+
                     // Telegram alert on discovery for standard proxy（可通过 DISABLE_DISCOVERY_TELEGRAM 关闭逐条提示）
                     if (!DISCOVERY_TG_DISABLED) {
-                        try {
-                            if (isTelegramEnabled()) {
-                                const message = buildUpgradeAlertMessage({
-                                    proxyAddress: contractAddress,
-                                    newImplementation: logicStorageValue,
-                                    blockNumber,
-                                    detection: 'discovery',
-                                });
-                                await sendTelegramAlert(message);
+                        const key = makePairKey(contractAddress, logicStorageValue);
+                        if (SENT_DISCOVERY_ALERT_KEYS.has(key)) {
+                            console.log(`[tg-dedupe] Discovery alert already sent for ${contractAddress} -> ${logicStorageValue}, skipping Telegram.`);
+                        } else {
+                            SENT_DISCOVERY_ALERT_KEYS.add(key);
+                            try {
+                                if (isTelegramEnabled()) {
+                                    const message = buildUpgradeAlertMessage({
+                                        proxyAddress: contractAddress,
+                                        newImplementation: logicStorageValue,
+                                        blockNumber,
+                                        detection: 'discovery',
+                                    });
+                                    await sendTelegramAlert(message);
+                                }
+                            } catch (alertErr) {
+                                console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                             }
-                        } catch (alertErr) {
-                            console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                         }
                     }
 
@@ -1244,27 +1293,38 @@ async function processProxyTypeResult(contractAddress: string, logicResponse: st
 
                 // Save to database
                 try {
-                    await saveOrUpdateProxyContract(
+                    const updated = await saveOrUpdateProxyContract(
                         contractAddress,
                         logicStorageValue,
                         '', // UUPS/standard without admin slot
                         blockNumber
                     );
 
+                    if (!updated) {
+                        console.log(`[discovery-skip] Non-EIP1967 proxy ${contractAddress} logic slot unchanged (${logicStorageValue}), skip alerts/analysis.`);
+                        return;
+                    }
+
                     // Telegram alert on discovery for non-EIP1967 proxy（可通过 DISABLE_DISCOVERY_TELEGRAM 关闭逐条提示）
                     if (!DISCOVERY_TG_DISABLED) {
-                        try {
-                            if (isTelegramEnabled()) {
-                                const message = buildUpgradeAlertMessage({
-                                    proxyAddress: contractAddress,
-                                    newImplementation: logicStorageValue,
-                                    blockNumber,
-                                    detection: 'discovery',
-                                });
-                                await sendTelegramAlert(message);
+                        const key = makePairKey(contractAddress, logicStorageValue);
+                        if (SENT_DISCOVERY_ALERT_KEYS.has(key)) {
+                            console.log(`[tg-dedupe] Discovery alert already sent for ${contractAddress} -> ${logicStorageValue}, skipping Telegram.`);
+                        } else {
+                            SENT_DISCOVERY_ALERT_KEYS.add(key);
+                            try {
+                                if (isTelegramEnabled()) {
+                                    const message = buildUpgradeAlertMessage({
+                                        proxyAddress: contractAddress,
+                                        newImplementation: logicStorageValue,
+                                        blockNumber,
+                                        detection: 'discovery',
+                                    });
+                                    await sendTelegramAlert(message);
+                                }
+                            } catch (alertErr) {
+                                console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                             }
-                        } catch (alertErr) {
-                            console.warn(`Telegram alert error (discovery): ${alertErr instanceof Error ? alertErr.message : String(alertErr)}`);
                         }
                     }
 
@@ -1807,6 +1867,13 @@ async function analyzePairAddresses(proxy: string, logic: string, checkKeys?: st
     }
 
     try {
+        const analysisKey = `${proxy.toLowerCase()}::${logic.toLowerCase()}::${built.used}`;
+        if (SENT_ANALYSIS_ALERT_KEYS.has(analysisKey)) {
+            console.log(`[tg-dedupe] Analysis alert already sent for ${proxy} -> ${logic} (mode=${built.used}), skipping Telegram.`);
+            return;
+        }
+        SENT_ANALYSIS_ALERT_KEYS.add(analysisKey);
+
         if (isTelegramEnabled()) {
             let summary = buildFindingsTelegramMessage(proxy, logic, built.used, findings);
 
