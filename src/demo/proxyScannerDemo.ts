@@ -1520,6 +1520,14 @@ async function main() {
         // Try to initialize database
         try {
             pool = new Pool(DB_CONFIG);
+
+            // Fix: Add error listener to prevent crash on idle client errors
+            // node-postgres will exit the process on idle client error if this listener is not present
+            pool.on('error', (err: any) => {
+                console.error('Unexpected error on idle database client:', err.message || err);
+                // Do not exit - keep scanning. The pool will try to reconnect automatically for new requests.
+            });
+
             await createTablesIfNotExist();
             isDatabaseAvailable = true;
             console.log("Database initialized successfully");
