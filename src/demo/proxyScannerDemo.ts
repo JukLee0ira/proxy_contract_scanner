@@ -155,6 +155,7 @@ function selectPairDetectors(keys?: string[]): any[] {
 // Global analyze mode flags for event-triggered analysis
 let analyzeModeEnabled: boolean = false;
 let selectedPairCheckKeys: string[] = [];
+let currentRunMode: string = 'unknown'; // Global variable to store current run mode
 
 // Event listener management for proxy contracts
 class ProxyEventListener {
@@ -806,21 +807,48 @@ async function createTablesIfNotExist() {
     const client = await pool.connect();
     try {
         // Create proxy_contracts table if it doesn't exist
+        // MODIFIED: Removed PRIMARY KEY to allow multiple records (history) for the same proxy address
         await client.query(`
             CREATE TABLE IF NOT EXISTS proxy_contracts (
-                proxy_address VARCHAR(42) PRIMARY KEY,
+                proxy_address VARCHAR(42),
                 logic_contract VARCHAR(42),
                 admin_contract VARCHAR(42),
                 detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 block_number BIGINT,
-                contract_type VARCHAR(50) DEFAULT 'unknown'
+                contract_type VARCHAR(50) DEFAULT 'unknown',
+                run_mode VARCHAR(50)
             )
         `);
+
+        // MIGRATION: Attempt to drop the primary key constraint from existing tables
+        // This is necessary to allow inserting historical records for the same proxy
+        try {
+            await client.query(`
+                ALTER TABLE proxy_contracts DROP CONSTRAINT IF EXISTS proxy_contracts_pkey
+            `);
+        } catch (e) {
+            // Ignore errors if constraint doesn't exist or we can't drop it (it might already be gone)
+            console.log("Info: Checked proxy_contracts_pkey constraint");
+        }
+
+        // MIGRATION: Add run_mode column if it doesn't exist
+        try {
+            await client.query(`
+                ALTER TABLE proxy_contracts ADD COLUMN IF NOT EXISTS run_mode VARCHAR(50)
+            `);
+        } catch (e) {
+            console.warn("Warning: Could not add run_mode column", e);
+        }
 
         // Create index for faster queries
         await client.query(`
             CREATE INDEX IF NOT EXISTS idx_proxy_contracts_logic ON proxy_contracts(logic_contract)
+        `);
+
+        // ADDED: Create index on proxy_address since it's no longer a primary key
+        await client.query(`
+            CREATE INDEX IF NOT EXISTS idx_proxy_contracts_address ON proxy_contracts(proxy_address)
         `);
 
         console.log("Database tables created successfully");
@@ -870,7 +898,21 @@ async function saveOrUpdateProxyContract(proxyAddress: string, logicContract: st
         if (upgradeTxHash) {
             // Include upgrade_tx_hash if provided (for upgrade events)
             insertQuery = `
-                INSERT INTO proxy_contracts (proxy_address, logic_contract, admin_contract, block_number, upgrade_tx_hash)
+                INSERT INTO proxy_contracts (proxy_address, logic_contract, admin_contract, block_number, upgrade_tx_hash, run_mode)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            `;
+            queryParams = [
+                lowerProxy,
+                lowerLogic,
+                lowerAdmin,
+                blockNumber,
+                upgradeTxHash,
+                currentRunMode
+            ];
+        } else {
+            // Original insert without upgrade_tx_hash (for discovery)
+            insertQuery = `
+                INSERT INTO proxy_contracts (proxy_address, logic_contract, admin_contract, block_number, run_mode)
                 VALUES ($1, $2, $3, $4, $5)
             `;
             queryParams = [
@@ -878,19 +920,7 @@ async function saveOrUpdateProxyContract(proxyAddress: string, logicContract: st
                 lowerLogic,
                 lowerAdmin,
                 blockNumber,
-                upgradeTxHash
-            ];
-        } else {
-            // Original insert without upgrade_tx_hash (for discovery)
-            insertQuery = `
-                INSERT INTO proxy_contracts (proxy_address, logic_contract, admin_contract, block_number)
-                VALUES ($1, $2, $3, $4)
-            `;
-            queryParams = [
-                lowerProxy,
-                lowerLogic,
-                lowerAdmin,
-                blockNumber
+                currentRunMode
             ];
         }
 
@@ -1467,6 +1497,10 @@ async function main() {
         }
         const modeArg = kv['mode'] || (args.includes('--analyze') ? 'listen-analyze' : undefined) || process.env.MODE;
         const analyzeEnabled = (process.env.ANALYZE === '1') || (modeArg === 'analyze') || (modeArg === 'listen-analyze');
+        
+        // Update global run mode
+        currentRunMode = modeArg || 'default';
+
         const checksArgRaw = kv['checks'] || process.env.CHECKS || kv['detectors'] || process.env.DETECTORS || '';
         const selectedCheckKeys = checksArgRaw
             ? checksArgRaw.split(',').map((s: string) => s.trim()).filter(Boolean)
