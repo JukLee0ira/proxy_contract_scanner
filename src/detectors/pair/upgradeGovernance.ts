@@ -20,7 +20,7 @@ export const UpgradeGovernancePairDetector: PairDetector = {
     name: 'upgrade-governance',
     async run(ctx: PairDetectorContext): Promise<PairDetectorFinding[]> {
         const findings: PairDetectorFinding[] = [];
-        const rpcUrl = process.env.RPC_URL || process.env.ETH_RPC_URL || 'http://localhost:8547';
+        const rpcUrl = process.env.RPC_URL ||  'http://localhost:8547';
         const provider = new ethers.JsonRpcProvider(rpcUrl);
 
         const proxy = ctx.proxy.address;

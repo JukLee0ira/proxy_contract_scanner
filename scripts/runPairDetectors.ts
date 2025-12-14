@@ -62,7 +62,7 @@ async function main() {
 
     let ctx: { proxy: any; logic: any };
     if (noSource) {
-        const rpcUrl = process.env.RPC_URL || process.env.ETH_RPC_URL || 'http://localhost:8547';
+        const rpcUrl = process.env.RPC_URL ||  'http://localhost:8547';
         const provider = new ethers.JsonRpcProvider(rpcUrl);
         const [proxyCode, logicCode] = await Promise.all([
             provider.getCode(proxy),

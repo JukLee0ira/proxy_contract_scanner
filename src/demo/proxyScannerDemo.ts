@@ -1839,7 +1839,7 @@ async function buildPairContext(proxy: string, logic: string): Promise<{ ctx: an
     }
 
     // Fallback to bytecode context
-    const rpcUrl = process.env.RPC_URL || process.env.ETH_RPC_URL || RPC_URL;
+    const rpcUrl = process.env.RPC_URL ||  RPC_URL;
     const bytecodeProvider = new (ethers as any).JsonRpcProvider(rpcUrl);
     const [proxyCode, logicCode] = await Promise.all([
         bytecodeProvider.getCode(proxy),

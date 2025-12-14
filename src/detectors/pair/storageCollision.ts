@@ -285,7 +285,7 @@ export const StorageCollisionPairDetector: PairDetector = {
         if ((!proxyHasSrc && !logicHasSrc) && (proxyBytecode || logicBytecode)) {
             const analysis = detectStorageCollisionFromBytecode(proxyBytecode, logicBytecode);
 
-            const rpcUrl = process.env.RPC_URL || process.env.ETH_RPC_URL || 'http://localhost:8547';
+            const rpcUrl = process.env.RPC_URL ||  'http://localhost:8547';
             const provider = new ethers.JsonRpcProvider(rpcUrl);
             const slot0 = await getStorageSlot0(provider, ctx.proxy.address);
             const eip1967AdminSlot = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
@@ -374,7 +374,7 @@ export const StorageCollisionPairDetector: PairDetector = {
         }
 
         // Stage 2: On-chain state check on slot 0
-        const rpcUrl = process.env.RPC_URL || process.env.ETH_RPC_URL || 'http://localhost:8547';
+        const rpcUrl = process.env.RPC_URL ||  'http://localhost:8547';
         const provider = new ethers.JsonRpcProvider(rpcUrl);
         const slot0 = await getStorageSlot0(provider, ctx.proxy.address);
 
