@@ -191,7 +191,7 @@ async function buildPairContext(proxy: string, logic: string): Promise<{ ctx: an
     }
 
     // Fallback to bytecode-based context
-    const rpcUrl = process.env.RPC_URL ||  'http://localhost:8547';
+    const rpcUrl : string =process.env.RPC_URL || 'https://rpc.ankr.com/xdc/ ';
     const provider = new ethers.JsonRpcProvider(rpcUrl);
     const [proxyCode, logicCode] = await Promise.all([
         provider.getCode(proxy),
@@ -306,7 +306,7 @@ async function main() {
 
     console.log('[batch] ▶️ Starting batch scan (only writing to results table, no listeners, no per-item TG).');
     console.log(`[batch] - DB_URL  : ${metaDbUrl}`);
-    console.log(`[batch] - RPC_URL : ${process.env.RPC_URL ||  'http://localhost:8547'}`);
+    console.log(`[batch] - RPC_URL : ${process.env.RPC_URL}`);
     if (scanAll) {
         console.log('[batch] - MODE    : ALL (scan all eligible rows in contracts; ignoring BATCH_SIZE)');
     } else {

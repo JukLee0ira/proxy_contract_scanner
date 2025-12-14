@@ -8,7 +8,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const RPC_URL = process.env.RPC_URL || "http://localhost:8545";
+const RPC_URL : string =process.env.RPC_URL || 'https://rpc.ankr.com/xdc/ ';
 
 const config: HardhatUserConfig = {
   solidity: {

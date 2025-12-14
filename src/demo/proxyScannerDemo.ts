@@ -38,7 +38,7 @@ function makePairKey(proxy: string, logic: string): string {
 }
 
 
-const RPC_URL = process.env.RPC_URL || "http://localhost:8547";
+const RPC_URL : string =process.env.RPC_URL || 'https://rpc.ankr.com/xdc/ ' ;
 
 // 批处理模式总开关：
 // - BATCH_MONITOR_MODE=1 时，等价于同时：
@@ -1839,7 +1839,7 @@ async function buildPairContext(proxy: string, logic: string): Promise<{ ctx: an
     }
 
     // Fallback to bytecode context
-    const rpcUrl = process.env.RPC_URL ||  RPC_URL;
+    const rpcUrl = process.env.RPC_URL|| 'https://rpc.ankr.com/xdc/ ';
     const bytecodeProvider = new (ethers as any).JsonRpcProvider(rpcUrl);
     const [proxyCode, logicCode] = await Promise.all([
         bytecodeProvider.getCode(proxy),

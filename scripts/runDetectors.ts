@@ -22,7 +22,7 @@ async function main() {
     const detectors = selectDetectors(keys);
     let findings;
     if (noSource) {
-        const rpcUrl = process.env.RPC_URL ||  'http://localhost:8547';
+        const rpcUrl : string =process.env.RPC_URL || 'https://rpc.ankr.com/xdc/ ';
         const provider = new ethers.JsonRpcProvider(rpcUrl);
         const code = await provider.getCode(addr);
         if (!code || code === '0x') {

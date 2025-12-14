@@ -146,7 +146,7 @@ export const MixingPatternsPairDetector: PairDetector = {
             return findings;
         }
 
-        const rpcUrl = process.env.RPC_URL ||  'http://localhost:8547';
+        const rpcUrl : string =process.env.RPC_URL || 'https://rpc.ankr.com/xdc/ ';
         const provider = new ethers.JsonRpcProvider(rpcUrl);
 
         // EIP-1967 标准槽位

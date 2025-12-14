@@ -171,7 +171,7 @@ export const LibraryMisuseNoSourcePairDetector: PairDetector = {
     async run(ctx: PairDetectorContext): Promise<PairDetectorFinding[]> {
         const findings: PairDetectorFinding[] = [];
 
-        const rpcUrl = process.env.RPC_URL ||  'http://localhost:8547';
+        const rpcUrl : string =process.env.RPC_URL || 'https://rpc.ankr.com/xdc/ ';
         const provider = new ethers.JsonRpcProvider(rpcUrl);
 
         const proxy = ctx.proxy.address.toLowerCase();
