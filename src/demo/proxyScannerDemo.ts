@@ -631,32 +631,38 @@ class StorageSlotMonitor {
                     });
                 }
 
-                // Check if any of the found addresses differ from the last known
-                let upgradeDetected = false;
-                let newLogicAddress = lastKnownLogic;
+                // 幂等化处理：
+                // - currentLogics 可能包含多个候选实现地址（来自不同 slot）
+                // - 只有当“上一次已知实现地址”完全不在本次集合中时，才判定为一次真正的升级
+                const lastLower = (lastKnownLogic || '').toLowerCase();
+                const currentSet = new Set(currentLogics.map(l => l.toLowerCase()));
 
-                for (const currentLogic of currentLogics) {
-                    if (currentLogic.toLowerCase() !== lastKnownLogic.toLowerCase()) {
-                        // Logic contract changed! This is an upgrade
-                        console.log(`🔥 Storage slot upgrade detected for proxy: ${proxyAddress}`);
-                        console.log(`  - Previous logic: ${lastKnownLogic}`);
-                        console.log(`  - New logic: ${currentLogic}`);
-
-                        upgradeDetected = true;
-                        newLogicAddress = currentLogic;
-                        break; // Use the first different address we find
-                    }
-                }
-
-                if (upgradeDetected) {
-                    // Update our record
-                    this.monitoredProxies.set(proxyAddress, newLogicAddress.toLowerCase());
-
-                    // Save upgrade event to database
-                    await this.saveUpgradeEvent(proxyAddress, newLogicAddress, 'storage_slot_change');
-                } else if (currentLogics.length === 0) {
+                if (currentSet.size === 0) {
                     console.warn(`⚠️  Could not read logic contract from storage slots for ${proxyAddress}`);
+                    continue;
                 }
+
+                // 如果当前集合里仍包含上一次的实现地址，则认为实现未变化（避免在多个 candidate 之间来回抖动）
+                if (lastLower && lastLower !== '0x0000000000000000000000000000000000000000' && currentSet.has(lastLower)) {
+                    console.log(`[storage-nochange] Logic slot for ${proxyAddress} still contains last known implementation: ${lastKnownLogic}`);
+                    continue;
+                }
+
+                // 走到这里说明：
+                // - 要么之前是 0 地址/空值，本次首次发现实现地址；
+                // - 要么之前的实现地址已经完全不在当前集合里，是真正的升级。
+                // 选一个确定性的地址作为“新实现”，这里简单地取第一个。
+                const newLogicAddress = currentLogics[0];
+
+                console.log(`🔥 Storage slot upgrade detected for proxy: ${proxyAddress}`);
+                console.log(`  - Previous logic: ${lastKnownLogic}`);
+                console.log(`  - New logic: ${newLogicAddress}`);
+
+                // Update our record
+                this.monitoredProxies.set(proxyAddress, newLogicAddress.toLowerCase());
+
+                // Save upgrade event to database
+                await this.saveUpgradeEvent(proxyAddress, newLogicAddress, 'storage_slot_change');
             } catch (error) {
                 console.error(`Error checking proxy ${proxyAddress}:`, error);
             }
