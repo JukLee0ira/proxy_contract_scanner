@@ -20,6 +20,7 @@
     "detect:selfdestruct": "ts-node scripts/runDetectors.ts",
     "detect:all": "ts-node scripts/runDetectors.ts",
     "detect:pair": "ts-node scripts/runPairDetectors.ts",
+    "demo:apothem:deploy-proxy1967": "hardhat run --network pNet scripts/deployProxy1967Apothem.ts",
     "scan": "ts-node src/demo/proxyScannerDemo.ts --scan",
     "dev": "nodemon --exec ts-node src/demo/proxyScannerDemo.ts",
     "build": "tsc",
