@@ -23,7 +23,7 @@ dotenv.config();
 
 // Concurrency control configuration
 const CONCURRENCY_CONFIG = {
-    MAX_CONCURRENT_BLOCKS: 1,     // Maximum number of blocks to process simultaneously
+    MAX_CONCURRENT_BLOCKS: 5,     // Maximum number of blocks to process simultaneously
     MAX_CONCURRENT_STORAGE_QUERIES: 5,  // Maximum concurrency for batch storage queries
     BATCH_SIZE: 10,               // Queue batch consumption size
     QUEUE_PROCESS_INTERVAL: 1000  // Queue processing interval (ms)
@@ -339,8 +339,17 @@ class ProxyEventListener {
 }
 
 // Storage slot monitor for non-EIP1967 proxy contracts
+
+type StorageProxyState = {
+    // 规范化后的“代表实现地址”（小写），用于向外暴露和与 DB 比对
+    lastCanonicalLogic: string;
+    // 上一次扫描到的候选实现集合（全部候选地址小写后排序，用逗号拼接）
+    // 用于幂等比较：集合内容相同则认为“本次扫描无变化”，不会重复记一次升级
+    lastCandidateSetKey: string;
+};
+
 class StorageSlotMonitor {
-    private monitoredProxies: Map<string, string> = new Map(); // proxyAddress -> lastKnownLogicAddress
+    private monitoredProxies: Map<string, StorageProxyState> = new Map(); // proxyAddress -> state
     private provider: any;
     private checkInterval: number; // milliseconds
     private intervalId: NodeJS.Timeout | null = null;
@@ -382,7 +391,18 @@ class StorageSlotMonitor {
             }
         }
 
-        this.monitoredProxies.set(proxyAddress, currentLogicAddress.toLowerCase());
+        const normalizedLogic = (currentLogicAddress || '').toLowerCase();
+
+        const state: StorageProxyState = {
+            lastCanonicalLogic: normalizedLogic,
+            // 初次加入监控时，我们只知道一个“代表实现”，candidate 集合后续再由 checkAllProxies 首次扫描更新
+            lastCandidateSetKey:
+                normalizedLogic && normalizedLogic !== '0x0000000000000000000000000000000000000000'
+                    ? normalizedLogic
+                    : ''
+        };
+
+        this.monitoredProxies.set(proxyAddress, state);
         console.log(`📊 Added proxy ${proxyAddress} to storage slot monitoring (current logic: ${currentLogicAddress})`);
     }
 
@@ -410,7 +430,12 @@ class StorageSlotMonitor {
         this.isRunning = true;
 
         this.intervalId = setInterval(() => {
-            this.checkAllProxies();
+            // 注意：checkAllProxies 是 async，如果里面抛出异常而这里不 catch，
+            // 在较新的 Node 版本上会变成未处理的 Promise rejection，可能直接让进程退出。
+            // 为了稳健性，这里统一兜底一下，避免整个扫描器“静默停止”。
+            this.checkAllProxies().catch((err: any) => {
+                console.error(`StorageSlotMonitor.checkAllProxies error:`, err instanceof Error ? err.message : String(err));
+            });
         }, this.checkInterval);
     }
 
@@ -619,7 +644,7 @@ class StorageSlotMonitor {
 
         console.log(`🔍 Checking ${this.monitoredProxies.size} non-EIP1967 proxies for upgrades...`);
 
-        for (const [proxyAddress, lastKnownLogic] of this.monitoredProxies.entries()) {
+        for (const [proxyAddress, proxyState] of this.monitoredProxies.entries()) {
             try {
                 const currentLogics = await this.checkProxyStorageSlot(proxyAddress);
 
@@ -631,38 +656,52 @@ class StorageSlotMonitor {
                     });
                 }
 
-                // 幂等化处理：
+                // 幂等化处理（升级版）：
                 // - currentLogics 可能包含多个候选实现地址（来自不同 slot）
-                // - 只有当“上一次已知实现地址”完全不在本次集合中时，才判定为一次真正的升级
-                const lastLower = (lastKnownLogic || '').toLowerCase();
-                const currentSet = new Set(currentLogics.map(l => l.toLowerCase()));
+                // - 我们用“候选集合是否变化”来判断是否产生一次真正的升级，而不是仅看单个 lastKnownLogic 是否还存在
+                const currentSet = Array.from(new Set(currentLogics.map(l => l.toLowerCase())));
 
-                if (currentSet.size === 0) {
+                if (currentSet.length === 0) {
                     console.warn(`⚠️  Could not read logic contract from storage slots for ${proxyAddress}`);
                     continue;
                 }
 
-                // 如果当前集合里仍包含上一次的实现地址，则认为实现未变化（避免在多个 candidate 之间来回抖动）
-                if (lastLower && lastLower !== '0x0000000000000000000000000000000000000000' && currentSet.has(lastLower)) {
-                    console.log(`[storage-nochange] Logic slot for ${proxyAddress} still contains last known implementation: ${lastKnownLogic}`);
+                // 对集合做排序，得到稳定的“签名”，避免因 slot 遍历顺序变化导致伪升级
+                currentSet.sort();
+                const currentKey = currentSet.join(',');
+                const prevKey = proxyState.lastCandidateSetKey || '';
+
+                if (prevKey === currentKey) {
+                    // 候选集合完全一致：本次扫描不视为升级
+                    console.log(`[storage-nochange] Logic slot candidate set unchanged for ${proxyAddress}: ${currentKey}`);
                     continue;
                 }
 
                 // 走到这里说明：
-                // - 要么之前是 0 地址/空值，本次首次发现实现地址；
-                // - 要么之前的实现地址已经完全不在当前集合里，是真正的升级。
-                // 选一个确定性的地址作为“新实现”，这里简单地取第一个。
-                const newLogicAddress = currentLogics[0];
+                // - 要么之前没有候选集合（首次发现实现地址）；
+                // - 要么候选集合内容发生了变化（新增/移除/替换实现），视为真正的升级事件。
+                //
+                // 选一个确定性的地址作为“代表实现”，这里取排序后的第一个（保证在“集合不变”时稳定）
+                const newLogicLower = currentSet[0];
+                const newLogicAddress =
+                    currentLogics.find(l => l.toLowerCase() === newLogicLower) ?? currentLogics[0];
+
+                const prevLogicForLog = proxyState.lastCanonicalLogic || 'unknown';
 
                 console.log(`🔥 Storage slot upgrade detected for proxy: ${proxyAddress}`);
-                console.log(`  - Previous logic: ${lastKnownLogic}`);
+                console.log(`  - Previous logic: ${prevLogicForLog}`);
                 console.log(`  - New logic: ${newLogicAddress}`);
 
                 // Update our record
-                this.monitoredProxies.set(proxyAddress, newLogicAddress.toLowerCase());
+                this.monitoredProxies.set(proxyAddress, {
+                    lastCanonicalLogic: newLogicLower,
+                    lastCandidateSetKey: currentKey,
+                });
 
                 // Save upgrade event to database
-                await this.saveUpgradeEvent(proxyAddress, newLogicAddress, 'storage_slot_change');
+                const detectionMethod =
+                    prevKey === '' ? 'initial_storage_detection' : 'storage_slot_change';
+                await this.saveUpgradeEvent(proxyAddress, newLogicAddress, detectionMethod);
             } catch (error) {
                 console.error(`Error checking proxy ${proxyAddress}:`, error);
             }
