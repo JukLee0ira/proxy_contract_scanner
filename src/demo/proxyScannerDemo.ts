@@ -346,6 +346,14 @@ type StorageProxyState = {
     // 上一次扫描到的候选实现集合（全部候选地址小写后排序，用逗号拼接）
     // 用于幂等比较：集合内容相同则认为“本次扫描无变化”，不会重复记一次升级
     lastCandidateSetKey: string;
+    // 为了避免存储槽读数轻微抖动导致的“来回升级”，增加一个“稳定 N 次才认定升级”的缓冲区：
+    // - pendingCandidateKey: 当前正在观察的新候选集合签名
+    // - stabilityCounter: 当前 pendingCandidateKey 已经连续出现的次数
+    pendingCandidateKey: string;
+    stabilityCounter: number;
+    // 抖动控制：如果在一个时间窗口内一直无法稳定，就主动放弃监控，避免长期噪音
+    unstableSince: number;   // 第一次观察到候选集合变化的时间戳（ms）
+    unstableChanges: number; // 发生过多少次“prevKey != currentKey”的变化
 };
 
 class StorageSlotMonitor {
@@ -399,7 +407,12 @@ class StorageSlotMonitor {
             lastCandidateSetKey:
                 normalizedLogic && normalizedLogic !== '0x0000000000000000000000000000000000000000'
                     ? normalizedLogic
-                    : ''
+                    : '',
+            // 升级“稳定判定”与抖动控制的初始状态
+            pendingCandidateKey: '',
+            stabilityCounter: 0,
+            unstableSince: 0,
+            unstableChanges: 0,
         };
 
         this.monitoredProxies.set(proxyAddress, state);
@@ -638,11 +651,19 @@ class StorageSlotMonitor {
      * Check all monitored proxies for changes
      */
     private async checkAllProxies(): Promise<void> {
+        // 配置：存储槽候选集合需要“连续稳定”多少次才认定为一次真正的升级
+        // 以及在一个时间窗口内抖动多少次就自动释放监控。
+        const STABILITY_REQUIRED_SCANS = 3;           // 至少连续 3 次看到同一个 candidateSet 才认定升级
+        const UNSTABLE_MAX_CHANGES = 20;              // 在窗口内候选集合变化超过 20 次视为持续抖动
+        const UNSTABLE_WINDOW_MS = 10 * 60 * 1000;    // 抖动观测窗口：10 分钟
+
         if (this.monitoredProxies.size === 0) {
             return;
         }
 
         console.log(`🔍 Checking ${this.monitoredProxies.size} non-EIP1967 proxies for upgrades...`);
+
+        const now = Date.now();
 
         for (const [proxyAddress, proxyState] of this.monitoredProxies.entries()) {
             try {
@@ -658,7 +679,8 @@ class StorageSlotMonitor {
 
                 // 幂等化处理（升级版）：
                 // - currentLogics 可能包含多个候选实现地址（来自不同 slot）
-                // - 我们用“候选集合是否变化”来判断是否产生一次真正的升级，而不是仅看单个 lastKnownLogic 是否还存在
+                // - 我们仍然用“候选集合是否变化”来初步判断是否可能产生升级，
+                //   但真正写入 DB / 触发分析前，会要求“连续稳定 N 次”以过滤掉短暂抖动。
                 const currentSet = Array.from(new Set(currentLogics.map(l => l.toLowerCase())));
 
                 if (currentSet.length === 0) {
@@ -670,38 +692,100 @@ class StorageSlotMonitor {
                 currentSet.sort();
                 const currentKey = currentSet.join(',');
                 const prevKey = proxyState.lastCandidateSetKey || '';
+                let stateChanged = false;
 
                 if (prevKey === currentKey) {
-                    // 候选集合完全一致：本次扫描不视为升级
-                    console.log(`[storage-nochange] Logic slot candidate set unchanged for ${proxyAddress}: ${currentKey}`);
+                    // 候选集合完全一致：本次扫描不视为“新升级事件”，但需要更新稳定计数 / 抖动状态。
+                    if (proxyState.pendingCandidateKey && proxyState.pendingCandidateKey === currentKey) {
+                        proxyState.stabilityCounter += 1;
+                        console.log(`[storage-pending] Candidate set for ${proxyAddress} still pending & stable (${proxyState.stabilityCounter}/${STABILITY_REQUIRED_SCANS}): ${currentKey}`);
+                    } else {
+                        // 回到了上一次确认过的集合，视为恢复稳定，清空 pending 与抖动状态
+                        if (proxyState.pendingCandidateKey) {
+                            console.log(`[storage-revert] Candidate set for ${proxyAddress} reverted to previous stable key, clearing pending state.`);
+                        }
+                        proxyState.pendingCandidateKey = '';
+                        proxyState.stabilityCounter = 0;
+                        proxyState.unstableChanges = 0;
+                        proxyState.unstableSince = 0;
+                    }
+
+                    // 如果当前 key 与 pending 相同且已经稳定足够次数，则认定升级一次并释放监控
+                    if (proxyState.pendingCandidateKey &&
+                        proxyState.pendingCandidateKey === currentKey &&
+                        proxyState.stabilityCounter >= STABILITY_REQUIRED_SCANS) {
+
+                        const newLogicLower = currentSet[0];
+                        const newLogicAddress =
+                            currentLogics.find(l => l.toLowerCase() === newLogicLower) ?? currentLogics[0];
+                        const prevLogicForLog = proxyState.lastCanonicalLogic || 'unknown';
+
+                        console.log(`🔥 [storage-confirmed] Storage slot upgrade confirmed for proxy: ${proxyAddress}`);
+                        console.log(`  - Previous logic: ${prevLogicForLog}`);
+                        console.log(`  - New logic: ${newLogicAddress}`);
+                        console.log(`  - Candidate set: ${currentKey}`);
+
+                        // 更新状态并写入 DB
+                        const newState: StorageProxyState = {
+                            ...proxyState,
+                            lastCanonicalLogic: newLogicLower,
+                            lastCandidateSetKey: currentKey,
+                            pendingCandidateKey: '',
+                            stabilityCounter: 0,
+                            unstableChanges: 0,
+                            unstableSince: 0,
+                        };
+                        this.monitoredProxies.set(proxyAddress, newState);
+                        stateChanged = true;
+
+                        const detectionMethod =
+                            prevKey === '' ? 'initial_storage_detection' : 'storage_slot_change';
+                        await this.saveUpgradeEvent(proxyAddress, newLogicAddress, detectionMethod);
+
+                        // 根据你的需求：一旦确认升级成功，就可以释放掉这个 monitor，避免后续重复抖动
+                        this.removeProxy(proxyAddress);
+                        console.log(`🧹 [storage-monitor] Removed proxy ${proxyAddress} from storage monitoring after confirmed upgrade.`);
+                    } else {
+                        console.log(`[storage-nochange] Logic slot candidate set unchanged for ${proxyAddress}: ${currentKey}`);
+                    }
+
                     continue;
                 }
 
                 // 走到这里说明：
                 // - 要么之前没有候选集合（首次发现实现地址）；
-                // - 要么候选集合内容发生了变化（新增/移除/替换实现），视为真正的升级事件。
-                //
-                // 选一个确定性的地址作为“代表实现”，这里取排序后的第一个（保证在“集合不变”时稳定）
-                const newLogicLower = currentSet[0];
-                const newLogicAddress =
-                    currentLogics.find(l => l.toLowerCase() === newLogicLower) ?? currentLogics[0];
+                // - 要么候选集合内容发生了变化（新增/移除/替换实现），先记录为“抖动/候选变化”，等待稳定。
+                proxyState.unstableChanges += 1;
+                if (!proxyState.unstableSince) {
+                    proxyState.unstableSince = now;
+                }
 
-                const prevLogicForLog = proxyState.lastCanonicalLogic || 'unknown';
+                if (proxyState.pendingCandidateKey === currentKey) {
+                    proxyState.stabilityCounter += 1;
+                } else {
+                    proxyState.pendingCandidateKey = currentKey;
+                    proxyState.stabilityCounter = 1;
+                }
 
-                console.log(`🔥 Storage slot upgrade detected for proxy: ${proxyAddress}`);
-                console.log(`  - Previous logic: ${prevLogicForLog}`);
-                console.log(`  - New logic: ${newLogicAddress}`);
+                console.log(`[storage-change] Candidate set changed for ${proxyAddress}: prevKey=${prevKey || '(none)'} -> currentKey=${currentKey} | pending=${proxyState.pendingCandidateKey} (stable ${proxyState.stabilityCounter}/${STABILITY_REQUIRED_SCANS})`);
 
-                // Update our record
+                // 如果在观察窗口内一直无法稳定，主动释放掉 monitor，防止长期噪音
+                const unstableDuration = proxyState.unstableSince ? now - proxyState.unstableSince : 0;
+                if (
+                    proxyState.unstableChanges >= UNSTABLE_MAX_CHANGES ||
+                    (proxyState.unstableSince && unstableDuration >= UNSTABLE_WINDOW_MS)
+                ) {
+                    console.warn(`[storage-unstable] Candidate set for ${proxyAddress} has been unstable for too long (changes=${proxyState.unstableChanges}, duration=${unstableDuration}ms). Removing from monitoring.`);
+                    this.removeProxy(proxyAddress);
+                    continue;
+                }
+
+                // 如果已经连续多次看到同一个 pendingKey，则在下一轮 “prevKey === currentKey” 时会真正确认升级
+                // 此处只更新 state，不写 DB。
                 this.monitoredProxies.set(proxyAddress, {
-                    lastCanonicalLogic: newLogicLower,
-                    lastCandidateSetKey: currentKey,
+                    ...proxyState,
                 });
-
-                // Save upgrade event to database
-                const detectionMethod =
-                    prevKey === '' ? 'initial_storage_detection' : 'storage_slot_change';
-                await this.saveUpgradeEvent(proxyAddress, newLogicAddress, detectionMethod);
+                stateChanged = true;
             } catch (error) {
                 console.error(`Error checking proxy ${proxyAddress}:`, error);
             }
