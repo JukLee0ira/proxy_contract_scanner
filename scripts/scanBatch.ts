@@ -191,7 +191,7 @@ async function buildPairContext(proxy: string, logic: string): Promise<{ ctx: an
     }
 
     // Fallback to bytecode-based context
-    const rpcUrl : string =process.env.RPC_URL || 'https://rpc.ankr.com/xdc/ ';
+    const rpcUrl: string = process.env.RPC_URL || 'https://rpc.ankr.com/xdc/';
     const provider = new ethers.JsonRpcProvider(rpcUrl);
     const [proxyCode, logicCode] = await Promise.all([
         provider.getCode(proxy),
@@ -414,8 +414,15 @@ async function main() {
             rows = res.rows;
             console.log(`[batch] ✅ Fetched ${rows.length} new addresses to scan (skipping already in proxy_scan_results).`);
             if (!rows.length) {
-                console.log('[batch] 🎉 No more eligible records to scan, exiting main loop.');
-                break;
+                // 持续监听模式：队列为空时等待新代理出现，而不是退出
+                // 这样可以应对出块慢、连续多块无代理交易等情况
+                const idleWaitSeconds = parseInt(process.env.IDLE_WAIT_SECONDS || '60', 10);
+                console.log('[batch] 😴 No new records found. This could be due to:');
+                console.log('[batch]    - All discovered proxies have been analyzed');
+                console.log('[batch]    - Slow block time or no new proxy contracts in recent blocks');
+                console.log(`[batch] ⏰ Waiting ${idleWaitSeconds}s before next check...`);
+                await new Promise(resolve => setTimeout(resolve, idleWaitSeconds * 1000));
+                continue;
             }
         } catch (e: any) {
             const code = (e as any)?.code || (e as any)?.original?.code;
