@@ -33,7 +33,7 @@ async function main() {
 
     const noSource = (process.env.NO_SOURCE === '1') || (kv['NO_SOURCE'] === '1') || (kv['no_source'] === '1') || (kv['no-source'] === '1');
 
-    async function analyzeOrFetch(address: string): Promise<{ slither: any; sources?: Record<string, string> }>{
+    async function analyzeOrFetch(address: string): Promise<{ slither: any; sources?: Record<string, string>; bytecode?: string }>{
         console.log(`[pair] analyzeContract -> ${address.toLowerCase()}`);
         try {
             const analysis = await analyzeContract(address);
@@ -56,13 +56,27 @@ async function main() {
             return { slither: {}, sources: verified.sources };
         } catch (e: any) {
             console.error(`[pair] Explorer source fetch FAILED for ${address.toLowerCase()} | ${e?.message || String(e)}`);
-            throw e;
+            console.warn(`[pair] Falling back to bytecode analysis for ${address.toLowerCase()}`);
+            // 降级到 bytecode 分析模式
+            const rpcUrl: string = process.env.RPC_URL || 'https://rpc.ankr.com/xdc/';
+            const provider = new ethers.JsonRpcProvider(rpcUrl);
+            try {
+                const code = await provider.getCode(address);
+                if (!code || code === '0x') {
+                    throw new Error(`No bytecode found at address ${address.toLowerCase()}`);
+                }
+                console.log(`[pair] Bytecode fetched for ${address.toLowerCase()} as last resort | length=${code.length}`);
+                return { slither: {}, bytecode: code };
+            } catch (bcError: any) {
+                console.error(`[pair] Bytecode fetch also FAILED for ${address.toLowerCase()} | ${bcError?.message || String(bcError)}`);
+                throw new Error(`All analysis methods failed for ${address.toLowerCase()}: Slither, Explorer, and Bytecode`);
+            }
         }
     }
 
     let ctx: { proxy: any; logic: any };
     if (noSource) {
-        const rpcUrl : string =process.env.RPC_URL || 'https://rpc.ankr.com/xdc/ ';
+        const rpcUrl: string = process.env.RPC_URL || 'https://rpc.ankr.com/xdc/';
         const provider = new ethers.JsonRpcProvider(rpcUrl);
         const [proxyCode, logicCode] = await Promise.all([
             provider.getCode(proxy),
@@ -87,17 +101,36 @@ async function main() {
         const logicSrcCount = logicData.sources ? Object.keys(logicData.sources).length : 0;
         const proxyNonEmpty = proxyData.sources ? Object.values(proxyData.sources).filter((c) => (c || '').trim().length > 0).length : 0;
         const logicNonEmpty = logicData.sources ? Object.values(logicData.sources).filter((c) => (c || '').trim().length > 0).length : 0;
-        console.log(`[pair] Prepared contexts | proxy{ slither=${!!proxyData.slither}, sources=${proxySrcCount}, nonEmpty=${proxyNonEmpty} } | logic{ slither=${!!logicData.slither}, sources=${logicSrcCount}, nonEmpty=${logicNonEmpty} }`);
+        const proxyHasBytecode = !!proxyData.bytecode;
+        const logicHasBytecode = !!logicData.bytecode;
+        console.log(`[pair] Prepared contexts | proxy{ slither=${!!proxyData.slither}, sources=${proxySrcCount}, nonEmpty=${proxyNonEmpty}, bytecode=${proxyHasBytecode} } | logic{ slither=${!!logicData.slither}, sources=${logicSrcCount}, nonEmpty=${logicNonEmpty}, bytecode=${logicHasBytecode} }`);
 
-        if (proxyNonEmpty === 0 || logicNonEmpty === 0) {
-            if (proxyNonEmpty === 0) console.error(`[pair] ERROR: No non-empty sources for proxy ${proxy.toLowerCase()}`);
-            if (logicNonEmpty === 0) console.error(`[pair] ERROR: No non-empty sources for logic ${logic.toLowerCase()}`);
-            console.error('[pair] Aborting: Both proxy and logic must have verified, non-empty sources before running pair detectors.');
+        // 如果没有源码但有 bytecode，则使用 bytecode 模式
+        if ((proxyNonEmpty === 0 && !proxyHasBytecode) || (logicNonEmpty === 0 && !logicHasBytecode)) {
+            if (proxyNonEmpty === 0 && !proxyHasBytecode) console.error(`[pair] ERROR: No sources or bytecode for proxy ${proxy.toLowerCase()}`);
+            if (logicNonEmpty === 0 && !logicHasBytecode) console.error(`[pair] ERROR: No sources or bytecode for logic ${logic.toLowerCase()}`);
+            console.error('[pair] Aborting: Both proxy and logic must have either verified sources or bytecode.');
             process.exit(2);
         }
+
+        // 如果两者都降级到了 bytecode 模式，给出警告
+        if (proxyNonEmpty === 0 && logicNonEmpty === 0) {
+            console.warn('[pair] WARNING: Both proxy and logic are using bytecode-only analysis. Detection accuracy may be reduced.');
+        }
+
         ctx = {
-            proxy: { address: proxy.toLowerCase(), slither: proxyData.slither, sources: proxyData.sources },
-            logic: { address: logic.toLowerCase(), slither: logicData.slither, sources: logicData.sources },
+            proxy: { 
+                address: proxy.toLowerCase(), 
+                slither: proxyData.slither, 
+                sources: proxyData.sources,
+                bytecode: proxyData.bytecode
+            },
+            logic: { 
+                address: logic.toLowerCase(), 
+                slither: logicData.slither, 
+                sources: logicData.sources,
+                bytecode: logicData.bytecode
+            },
         };
     }
 
