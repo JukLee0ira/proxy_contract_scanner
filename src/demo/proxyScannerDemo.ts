@@ -10,6 +10,7 @@ import { StorageCollisionPairDetector } from "../detectors/pair/storageCollision
 import { InitializerMistakesPairDetector } from "../detectors/pair/initializerMistakes";
 import { MixingPatternsPairDetector } from "../detectors/pair/mixingPatterns";
 import { LibraryMisusePairDetector } from "../detectors/pair/libraryMisuse";
+import { initializeRpcManager, getRpcManager } from "../utils/rpcManager";
 
 // TypeScript type declarations for CommonJS imports
 type EthersType = {
@@ -39,6 +40,9 @@ function makePairKey(proxy: string, logic: string): string {
 
 
 const RPC_URL : string =process.env.RPC_URL || 'https://rpc.ankr.com/xdc/ ' ;
+
+// Initialize RPC Manager with failover support
+const rpcManager = initializeRpcManager(RPC_URL);
 
 // 批处理模式总开关：
 // - BATCH_MONITOR_MODE=1 时，等价于同时：
@@ -83,11 +87,12 @@ if (WS_URL) {
         provider = new (ethers as any).WebSocketProvider(WS_URL);
         console.log(`Using WebSocket provider for events: ${WS_URL}`);
     } catch (e) {
-        console.warn(`Failed to init WebSocket provider, fallback to HTTP: ${e instanceof Error ? e.message : String(e)}`);
-        provider = new (ethers as any).JsonRpcProvider(RPC_URL);
+        console.warn(`Failed to init WebSocket provider, fallback to HTTP with failover: ${e instanceof Error ? e.message : String(e)}`);
+        provider = rpcManager.createProviderProxy();
     }
 } else {
-    provider = new (ethers as any).JsonRpcProvider(RPC_URL);
+    provider = rpcManager.createProviderProxy();
+    console.log(`Using HTTP provider with automatic failover`);
 }
 
 // PostgreSQL connection pool (only create if database is available)
@@ -1968,11 +1973,9 @@ async function buildPairContext(proxy: string, logic: string): Promise<{ ctx: an
     }
 
     // Fallback to bytecode context
-    const rpcUrl = process.env.RPC_URL|| 'https://rpc.ankr.com/xdc/ ';
-    const bytecodeProvider = new (ethers as any).JsonRpcProvider(rpcUrl);
     const [proxyCode, logicCode] = await Promise.all([
-        bytecodeProvider.getCode(proxy),
-        bytecodeProvider.getCode(logic),
+        rpcManager.getCode(proxy),
+        rpcManager.getCode(logic),
     ]);
     if (!proxyCode || proxyCode === '0x') {
         console.error('[analyze] No bytecode at proxy address. Aborting analysis.');

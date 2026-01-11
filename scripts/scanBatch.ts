@@ -9,6 +9,7 @@ import { MixingPatternsPairDetector } from '../src/detectors/pair/mixingPatterns
 import { LibraryMisusePairDetector } from '../src/detectors/pair/libraryMisuse';
 import { getVerifiedSource } from '../src/clients/etherscan';
 import { isTelegramEnabled, sendTelegramAlert } from '../src/alert/telegram';
+import { initializeRpcManager, getRpcManager } from '../src/utils/rpcManager';
 
 type Severity = 'NONE' | 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH';
 type VulnBucket = 'critical' | 'major' | 'minor';
@@ -191,11 +192,10 @@ async function buildPairContext(proxy: string, logic: string): Promise<{ ctx: an
     }
 
     // Fallback to bytecode-based context
-    const rpcUrl: string = process.env.RPC_URL || 'https://rpc.ankr.com/xdc/';
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const rpcManager = getRpcManager();
     const [proxyCode, logicCode] = await Promise.all([
-        provider.getCode(proxy),
-        provider.getCode(logic),
+        rpcManager.getCode(proxy),
+        rpcManager.getCode(logic),
     ]);
     if (!proxyCode || proxyCode === '0x') {
         console.error('[batch] No bytecode at proxy address, skipping.');
@@ -282,6 +282,10 @@ async function analyzePair(proxy: string, logic: string): Promise<RiskRow | null
 }
 
 async function main() {
+    // Initialize RPC Manager with failover support
+    const rpcUrl: string = process.env.RPC_URL || 'https://rpc.ankr.com/xdc/';
+    initializeRpcManager(rpcUrl);
+    
     const metaDbUrl = process.env.XDC_META_DB_URL || process.env.BATCH_DB_URL || process.env.DATABASE_URL;
     if (!metaDbUrl) {
         console.error('[batch] ❌ Batch scan database URL is not configured (XDC_META_DB_URL / BATCH_DB_URL / DATABASE_URL).');

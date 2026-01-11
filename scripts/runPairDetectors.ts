@@ -7,6 +7,7 @@ import { InitializerMistakesPairDetector } from '../src/detectors/pair/initializ
 import { MixingPatternsPairDetector } from '../src/detectors/pair/mixingPatterns';
 import { LibraryMisusePairDetector } from '../src/detectors/pair/libraryMisuse';
 import { ethers } from 'ethers';
+import { initializeRpcManager, getRpcManager } from '../src/utils/rpcManager';
 
 function pickAddress(args: string[], idx: number): string | undefined {
     const pos = args.filter(a => !a.includes('='))[idx];
@@ -30,6 +31,10 @@ async function main() {
     }
 
     console.log(`[pair] Starting analysis. proxy=${proxy.toLowerCase()} logic=${logic.toLowerCase()}`);
+
+    // Initialize RPC Manager with failover support
+    const rpcUrl: string = process.env.RPC_URL || 'https://rpc.ankr.com/xdc/';
+    const rpcManager = initializeRpcManager(rpcUrl);
 
     const noSource = (process.env.NO_SOURCE === '1') || (kv['NO_SOURCE'] === '1') || (kv['no_source'] === '1') || (kv['no-source'] === '1');
 
@@ -58,10 +63,8 @@ async function main() {
             console.error(`[pair] Explorer source fetch FAILED for ${address.toLowerCase()} | ${e?.message || String(e)}`);
             console.warn(`[pair] Falling back to bytecode analysis for ${address.toLowerCase()}`);
             // 降级到 bytecode 分析模式
-            const rpcUrl: string = process.env.RPC_URL || 'https://rpc.ankr.com/xdc/';
-            const provider = new ethers.JsonRpcProvider(rpcUrl);
             try {
-                const code = await provider.getCode(address);
+                const code = await rpcManager.getCode(address);
                 if (!code || code === '0x') {
                     throw new Error(`No bytecode found at address ${address.toLowerCase()}`);
                 }
@@ -76,11 +79,9 @@ async function main() {
 
     let ctx: { proxy: any; logic: any };
     if (noSource) {
-        const rpcUrl: string = process.env.RPC_URL || 'https://rpc.ankr.com/xdc/';
-        const provider = new ethers.JsonRpcProvider(rpcUrl);
         const [proxyCode, logicCode] = await Promise.all([
-            provider.getCode(proxy),
-            provider.getCode(logic),
+            rpcManager.getCode(proxy),
+            rpcManager.getCode(logic),
         ]);
         if (!proxyCode || proxyCode === '0x') {
             console.error('[pair] No bytecode found at proxy address (getCode returned 0x). Check RPC and proxy address.');
